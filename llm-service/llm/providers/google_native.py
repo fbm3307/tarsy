@@ -200,8 +200,9 @@ class GoogleNativeProvider(LLMProvider):
         If MCP tools are present, native tools are suppressed
         (mutual exclusivity per Gemini API constraint).
 
-        Image model variants don't support url_context; it is silently
-        filtered out to avoid 400 errors from the Gemini API.
+        Image model variants only support google_search; url_context and
+        code_execution are filtered out to avoid 400 errors from the
+        Gemini API.  Any skipped tools are logged at INFO level.
         """
         result_tools: List[genai_types.Tool] = []
 
@@ -224,17 +225,21 @@ class GoogleNativeProvider(LLMProvider):
                 )
             result_tools.append(genai_types.Tool(function_declarations=declarations))
 
-        # Add native tools (only when no MCP tools)
+        # Add native tools (only when no MCP tools).
+        # Image model variants only support google_search; url_context and
+        # code_execution are not available and would cause a 400 error.
         if not has_mcp_tools and native_tools:
             is_image = self._is_image_model(model)
             if native_tools.get("google_search"):
                 result_tools.append(genai_types.Tool(google_search=genai_types.GoogleSearch()))
-            if native_tools.get("code_execution"):
+            if native_tools.get("code_execution") and not is_image:
                 result_tools.append(genai_types.Tool(code_execution=genai_types.ToolCodeExecution()))
             if native_tools.get("url_context") and not is_image:
                 result_tools.append(genai_types.Tool(url_context=genai_types.UrlContext()))
-            elif native_tools.get("url_context") and is_image:
-                logger.info("Skipping url_context for image model %s (not supported)", model)
+            if is_image:
+                skipped = [t for t in ("url_context", "code_execution") if native_tools.get(t)]
+                if skipped:
+                    logger.info("Skipping %s for image model %s (not supported)", ", ".join(skipped), model)
 
         return result_tools if result_tools else None
 
