@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -159,6 +160,39 @@ func TestWorkerStopIdempotent(t *testing.T) {
 
 	// Second stop should also succeed (no panic)
 	assert.NotPanics(t, func() { w.Stop() })
+}
+
+func TestApplySafetyNet(t *testing.T) {
+	timeout := 30 * time.Second
+
+	t.Run("failed with cancelled context becomes cancelled", func(t *testing.T) {
+		input := &ExecutionResult{Status: alertsession.StatusFailed, Error: fmt.Errorf("some DB error")}
+		got := applySafetyNet(input, context.Canceled, timeout)
+		assert.Equal(t, alertsession.StatusCancelled, got.Status)
+		assert.ErrorIs(t, got.Error, context.Canceled)
+	})
+
+	t.Run("failed with deadline exceeded becomes timed_out", func(t *testing.T) {
+		input := &ExecutionResult{Status: alertsession.StatusFailed, Error: fmt.Errorf("some DB error")}
+		got := applySafetyNet(input, context.DeadlineExceeded, timeout)
+		assert.Equal(t, alertsession.StatusTimedOut, got.Status)
+		assert.Contains(t, got.Error.Error(), "timed out")
+		assert.Contains(t, got.Error.Error(), timeout.String())
+	})
+
+	t.Run("failed with active context stays failed", func(t *testing.T) {
+		input := &ExecutionResult{Status: alertsession.StatusFailed, Error: fmt.Errorf("genuine failure")}
+		got := applySafetyNet(input, nil, timeout)
+		assert.Equal(t, alertsession.StatusFailed, got.Status)
+		assert.Same(t, input, got)
+	})
+
+	t.Run("completed with cancelled context stays completed", func(t *testing.T) {
+		input := &ExecutionResult{Status: alertsession.StatusCompleted}
+		got := applySafetyNet(input, context.Canceled, timeout)
+		assert.Equal(t, alertsession.StatusCompleted, got.Status)
+		assert.Same(t, input, got)
+	})
 }
 
 func TestWorkerPollIntervalWithNegativeJitter(t *testing.T) {

@@ -190,6 +190,20 @@ func (s *TimelineService) CompleteTimelineEventWithMetadata(ctx context.Context,
 // FailTimelineEvent marks an event as failed with an error message.
 // Used to clean up streaming events that were interrupted by an error.
 func (s *TimelineService) FailTimelineEvent(ctx context.Context, eventID string, content string) error {
+	return s.setTerminalStatus(ctx, eventID, content, timelineevent.StatusFailed)
+}
+
+// CancelTimelineEvent marks a timeline event as cancelled with the given content.
+func (s *TimelineService) CancelTimelineEvent(ctx context.Context, eventID string, content string) error {
+	return s.setTerminalStatus(ctx, eventID, content, timelineevent.StatusCancelled)
+}
+
+// TimeoutTimelineEvent marks a timeline event as timed out with the given content.
+func (s *TimelineService) TimeoutTimelineEvent(ctx context.Context, eventID string, content string) error {
+	return s.setTerminalStatus(ctx, eventID, content, timelineevent.StatusTimedOut)
+}
+
+func (s *TimelineService) setTerminalStatus(ctx context.Context, eventID string, content string, status timelineevent.Status) error {
 	if eventID == "" {
 		return NewValidationError("eventID", "required")
 	}
@@ -201,7 +215,7 @@ func (s *TimelineService) FailTimelineEvent(ctx context.Context, eventID string,
 	defer cancel()
 
 	err := s.client.TimelineEvent.UpdateOneID(eventID).
-		SetStatus(timelineevent.StatusFailed).
+		SetStatus(status).
 		SetContent(content).
 		SetUpdatedAt(time.Now()).
 		Exec(writeCtx)
@@ -209,7 +223,7 @@ func (s *TimelineService) FailTimelineEvent(ctx context.Context, eventID string,
 		if ent.IsNotFound(err) {
 			return ErrNotFound
 		}
-		return fmt.Errorf("failed to mark timeline event as failed: %w", err)
+		return fmt.Errorf("failed to set timeline event to %s: %w", status, err)
 	}
 
 	return nil
