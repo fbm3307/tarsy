@@ -32,24 +32,31 @@ Fallback operates at the **Go controller level** (`pkg/agent/controller/iteratin
 ```
 Iteration N: LLM call fails (after Python retries exhausted)
     │
-    ├─ Partial output received? → NO fallback for this call
-    │                              (treat as recoverable, retry via iteration)
-    │
     ├─ Parent context cancelled? → Return immediately (session expired)
     │
-    └─ No partial output, retryable error:
+    ├─ Loop detection error? → Not a provider issue, no fallback
+    │
+    └─ Evaluate error code against trigger rules:
          │
-         ├─ Fallback providers available? 
-         │    │
-         │    ├─ YES → Select next fallback provider
-         │    │         Record fallback timeline event
-         │    │         Update execution metadata
-         │    │         Swap provider in execCtx.Config
-         │    │         Continue iteration loop with new provider
-         │    │
-         │    └─ NO → Record failure, continue as today
+         ├─ max_retries / credentials → Immediate fallback trigger
          │
-         └─ (All fallback providers exhausted → fail execution)
+         ├─ provider_error / invalid_request / partial_stream_error
+         │    → Increment consecutive counter; trigger after 2 consecutive
+         │      failures (1 Go retry on the same provider first)
+         │
+         └─ Fallback triggered?
+              │
+              ├─ Fallback providers available?
+              │    │
+              │    ├─ YES → Select next fallback provider
+              │    │         Record fallback timeline event
+              │    │         Update execution metadata
+              │    │         Swap provider in execCtx.Config
+              │    │         Continue iteration loop with new provider
+              │    │
+              │    └─ NO → Record failure, continue as today
+              │
+              └─ NO trigger → Retry iteration with same provider
 ```
 
 **Decision (Q1):** Fallback sticks for the rest of the execution. Each new execution (stage, sub-agent) starts fresh with the primary provider via `ResolveAgentConfig`.
@@ -110,7 +117,7 @@ type FallbackState struct {
     CurrentProviderIndex    int      // -1 = primary, 0+ = fallback list index
     AttemptedProviders      []string // For observability
     FallbackReason          string   // Last error that triggered fallback
-    ConsecutiveNonRetryable int      // Counts consecutive provider_error/invalid_request (threshold: 1)
+    ConsecutiveProviderErrors int     // Counts consecutive provider_error/invalid_request/transport (threshold: 2)
     ConsecutivePartialErrors int     // Counts consecutive partial_stream_error (threshold: 2)
 }
 ```
@@ -154,9 +161,9 @@ Fallback triggers depend on the error code from the Python LLM service, since ea
 |---|---|---|
 | `max_retries` | Yes (3x) | Immediate |
 | `credentials` | No | Immediate (guaranteed failure) |
-| `provider_error` | No | After 1 Go retry |
-| `invalid_request` | No | After 1 Go retry |
-| `partial_stream_error` | No | After 2 consecutive partial errors |
+| `provider_error` | No | After 1 Go retry (2 consecutive failures) |
+| `invalid_request` | No | After 1 Go retry (2 consecutive failures) |
+| `partial_stream_error` | No | After 1 Go retry (2 consecutive failures) |
 
 In all cases, fallback also requires:
 - The parent context is not cancelled/expired
@@ -201,7 +208,7 @@ Tests:
 - `pkg/config/validator_test.go` — Startup validation: missing provider, invalid backend, missing credentials
 - `pkg/agent/config_resolver_test.go` — Fallback list resolution through hierarchy
 
-### Phase 2: Core Fallback Logic (P2)
+### Phase 2: Core Fallback Logic (P2) - ✅ DONE
 
 **Goal:** When a provider fails, automatically switch to the next fallback provider based on error-code-aware trigger rules (Q7). All LLM call sites get fallback (Q6).
 
@@ -252,5 +259,5 @@ All decisions resolved — see [llm-provider-fallback-questions.md](llm-provider
 4. **Q4** — Validate fallback credentials at startup; fail if any are missing
 5. **Q5** — Two new nullable columns: `original_llm_provider`, `original_llm_backend`
 6. **Q6** — All controllers get fallback (iterating, forced conclusion, single-shot)
-7. **Q7** — Error-code-aware triggers: immediate for `max_retries`/`credentials`, 1 Go retry for `provider_error`/`invalid_request`, 2 consecutive for `partial_stream_error`
+7. **Q7** — Error-code-aware triggers: immediate for `max_retries`/`credentials`, 2 consecutive failures for `provider_error`/`invalid_request`/`partial_stream_error`
 8. **Q8** — Conservative defaults: 120s initial, 60s stall, 5m max

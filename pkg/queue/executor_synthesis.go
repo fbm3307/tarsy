@@ -12,6 +12,7 @@ import (
 	"github.com/codeready-toolchain/tarsy/ent/timelineevent"
 	"github.com/codeready-toolchain/tarsy/pkg/agent"
 	agentctx "github.com/codeready-toolchain/tarsy/pkg/agent/context"
+	"github.com/codeready-toolchain/tarsy/pkg/agent/controller"
 	"github.com/codeready-toolchain/tarsy/pkg/config"
 	"github.com/codeready-toolchain/tarsy/pkg/events"
 	"github.com/codeready-toolchain/tarsy/pkg/models"
@@ -229,43 +230,142 @@ func (e *RealSessionExecutor) generateExecutiveSummary(
 		{Role: agent.RoleUser, Content: userPrompt},
 	}
 
-	// Single LLM call — no tools, consume full response from stream
-	llmInput := &agent.GenerateInput{
-		SessionID: session.ID,
-		Messages:  messages,
-		Config:    provider,
-		Backend:   backend,
+	// Resolve fallback providers for executive summary (defaults → chain)
+	var fallbackEntries []agent.ResolvedFallbackEntry
+	var rawFallback []config.FallbackProviderEntry
+	if e.cfg.Defaults != nil && e.cfg.Defaults.FallbackProviders != nil {
+		rawFallback = e.cfg.Defaults.FallbackProviders
+	}
+	if chain.FallbackProviders != nil {
+		rawFallback = chain.FallbackProviders
+	}
+	for _, entry := range rawFallback {
+		fbProvider, fbErr := e.cfg.GetLLMProvider(entry.Provider)
+		if fbErr != nil {
+			logger.Warn("Executive summary fallback provider not found, skipping",
+				"provider", entry.Provider, "error", fbErr)
+			continue
+		}
+		fallbackEntries = append(fallbackEntries, agent.ResolvedFallbackEntry{
+			ProviderName: entry.Provider,
+			Backend:      entry.Backend,
+			Config:       fbProvider,
+		})
 	}
 
-	// Derive a cancellable context so the producer goroutine in Generate
-	// is always cleaned up when we return (e.g. on ErrorChunk early exit).
-	llmCtx, llmCancel := context.WithCancel(ctx)
-	defer llmCancel()
-
-	ch, err := e.llmClient.Generate(llmCtx, llmInput)
-	if err != nil {
-		return "", fmt.Errorf("executive summary LLM call failed: %w", err)
-	}
-
-	// Collect full text response and token usage.
-	var sb strings.Builder
-	var usage agent.TokenUsage
-	for chunk := range ch {
-		switch c := chunk.(type) {
-		case *agent.TextChunk:
-			sb.WriteString(c.Content)
-		case *agent.UsageChunk:
-			usage.InputTokens += c.InputTokens
-			usage.OutputTokens += c.OutputTokens
-			usage.TotalTokens += c.TotalTokens
-		case *agent.ErrorChunk:
-			return "", fmt.Errorf("executive summary LLM error: %s", c.Message)
+	// Single LLM call — no tools, consume full response from stream.
+	// Retry once on the same provider for transient errors, then fall back.
+	emitFallbackEvent := func(fromProvider string, toEntry agent.ResolvedFallbackEntry, reason string) {
+		_, evtErr := timelineService.CreateTimelineEvent(ctx, models.CreateTimelineEventRequest{
+			SessionID:      session.ID,
+			SequenceNumber: executiveSummarySeqNum - 1,
+			EventType:      timelineevent.EventTypeProviderFallback,
+			Status:         timelineevent.StatusCompleted,
+			Content:        fmt.Sprintf("Provider fallback: %s → %s", fromProvider, toEntry.ProviderName),
+			Metadata: map[string]any{
+				"original_provider": fromProvider,
+				"fallback_provider": toEntry.ProviderName,
+				"fallback_backend":  string(toEntry.Backend),
+				"reason":            reason,
+			},
+		})
+		if evtErr != nil {
+			logger.Warn("Failed to create provider_fallback timeline event", "error", evtErr)
 		}
 	}
 
-	summary := sb.String()
-	if summary == "" {
-		return "", fmt.Errorf("executive summary LLM returned empty response")
+	var summary string
+	var usage agent.TokenUsage
+	fallbackIdx := -1 // -1 = primary, 0+ = fallback index
+	clearCache := false
+	retriedCurrentProvider := false
+	for {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("executive summary interrupted: %w", ctx.Err())
+		}
+		llmInput := &agent.GenerateInput{
+			SessionID:  session.ID,
+			Messages:   messages,
+			Config:     provider,
+			Backend:    backend,
+			ClearCache: clearCache,
+		}
+		clearCache = false // consume once per provider switch
+
+		llmCtx, llmCancel := context.WithCancel(ctx)
+		ch, err := e.llmClient.Generate(llmCtx, llmInput)
+		if err != nil {
+			llmCancel()
+			// Transport errors are transient — retry once before fallback
+			if !retriedCurrentProvider {
+				retriedCurrentProvider = true
+				continue
+			}
+			if nextIdx := fallbackIdx + 1; nextIdx < len(fallbackEntries) {
+				entry := fallbackEntries[nextIdx]
+				logger.Info("Executive summary falling back to next provider",
+					"from_provider", providerName, "to_provider", entry.ProviderName,
+					"reason", err.Error())
+				emitFallbackEvent(providerName, entry, err.Error())
+				provider = entry.Config
+				providerName = entry.ProviderName
+				backend = entry.Backend
+				fallbackIdx = nextIdx
+				clearCache = true
+				retriedCurrentProvider = false
+				continue
+			}
+			return "", fmt.Errorf("executive summary LLM call failed: %w", err)
+		}
+
+		var sb strings.Builder
+		var chunkErr error
+		var chunkErrCode string
+		for chunk := range ch {
+			switch c := chunk.(type) {
+			case *agent.TextChunk:
+				sb.WriteString(c.Content)
+			case *agent.UsageChunk:
+				usage.InputTokens += c.InputTokens
+				usage.OutputTokens += c.OutputTokens
+				usage.TotalTokens += c.TotalTokens
+			case *agent.ErrorChunk:
+				chunkErr = fmt.Errorf("executive summary LLM error: %s (code: %s)", c.Message, c.Code)
+				chunkErrCode = string(c.Code)
+			}
+		}
+		llmCancel()
+
+		if chunkErr != nil {
+			// credentials/max_retries: fallback immediately (no retry).
+			// Other codes: retry once on the same provider before fallback.
+			immediatefallback := chunkErrCode == string(controller.LLMErrorCredentials) || chunkErrCode == string(controller.LLMErrorMaxRetries)
+			if !immediatefallback && !retriedCurrentProvider {
+				retriedCurrentProvider = true
+				continue
+			}
+			if nextIdx := fallbackIdx + 1; nextIdx < len(fallbackEntries) {
+				entry := fallbackEntries[nextIdx]
+				logger.Info("Executive summary falling back to next provider",
+					"from_provider", providerName, "to_provider", entry.ProviderName,
+					"reason", chunkErr.Error())
+				emitFallbackEvent(providerName, entry, chunkErr.Error())
+				provider = entry.Config
+				providerName = entry.ProviderName
+				backend = entry.Backend
+				fallbackIdx = nextIdx
+				clearCache = true
+				retriedCurrentProvider = false
+				continue
+			}
+			return "", chunkErr
+		}
+
+		summary = sb.String()
+		if summary == "" {
+			return "", fmt.Errorf("executive summary LLM returned empty response")
+		}
+		break
 	}
 
 	durationMs := int(time.Since(startTime).Milliseconds())
