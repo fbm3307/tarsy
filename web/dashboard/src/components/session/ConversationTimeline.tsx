@@ -8,7 +8,6 @@ import {
   CardContent,
   Button,
 } from '@mui/material';
-import { Virtuoso } from 'react-virtuoso';
 import {
   ExpandMore,
   ExpandLess,
@@ -253,6 +252,72 @@ export default function ConversationTimeline({
     return byStage;
   }, [streamingEvents]);
 
+  // --- Ungrouped streaming entries ---
+  const ungroupedStreamingEntries = useMemo(() => {
+    const ungrouped = streamingByStage.get('__ungrouped__');
+    if (!ungrouped) return [];
+    return Array.from(ungrouped.entries())
+      .filter(([, streamItem]) => streamItem.eventType !== TIMELINE_EVENT_TYPES.EXECUTIVE_SUMMARY);
+  }, [streamingByStage]);
+
+  // --- Processing indicator display status ---
+  const showProcessingIndicator = isActive || !!chatStageInProgress;
+
+  const displayStatus = useMemo(() => {
+    let status = progressStatus || 'Processing...';
+
+    if (chatStageInProgress && !isActive) {
+      status = 'Processing...';
+    }
+
+    if (!selectedAgentExecutionId && agentProgressStatuses && agentProgressStatuses.size === 1) {
+      const singleAgentStatus = agentProgressStatuses.values().next().value;
+      if (singleAgentStatus) status = singleAgentStatus;
+    }
+
+    if (selectedAgentExecutionId) {
+      const agentStatus = agentProgressStatuses?.get(selectedAgentExecutionId);
+      if (agentStatus) {
+        status = agentStatus;
+      }
+
+      const wsEntry = executionStatuses?.get(selectedAgentExecutionId);
+      const isSelectedTerminal = (() => {
+        if (wsEntry && TERMINAL_EXECUTION_STATUSES.has(wsEntry.status)) return true;
+        for (const stage of stages) {
+          const eo = stage.executions?.find(e => e.execution_id === selectedAgentExecutionId);
+          if (eo && TERMINAL_EXECUTION_STATUSES.has(eo.status)) return true;
+        }
+        return false;
+      })();
+
+      if (isSelectedTerminal) {
+        const stageId = wsEntry?.stageId
+          || stages.find(s => s.executions?.some(e => e.execution_id === selectedAgentExecutionId))?.id;
+
+        if (stageId) {
+          const othersRunning =
+            (executionStatuses ? Array.from(executionStatuses.entries()).some(
+              ([id, entry]) =>
+                id !== selectedAgentExecutionId &&
+                entry.stageId === stageId &&
+                !TERMINAL_EXECUTION_STATUSES.has(entry.status),
+            ) : false) ||
+            (stages.find(s => s.id === stageId)?.executions?.some(
+              e => e.execution_id !== selectedAgentExecutionId &&
+                !TERMINAL_EXECUTION_STATUSES.has(e.status),
+            ) ?? false);
+
+          if (othersRunning) {
+            status = 'Waiting for other agents...';
+          }
+        }
+      }
+    }
+
+    return status;
+  }, [progressStatus, chatStageInProgress, isActive, selectedAgentExecutionId, agentProgressStatuses, executionStatuses, stages]);
+
   if (items.length === 0 && (!streamingEvents || streamingEvents.size === 0)) {
     // Session is active but no timeline items have arrived yet — show the
     // same pulsing ring spinner used by SessionDetailPage so there is no
@@ -394,132 +459,71 @@ export default function ConversationTimeline({
 
       {/* Content area */}
       <Box sx={{ px: 3, pt: 3, pb: 5, bgcolor: 'white', minHeight: 200 }} data-autoscroll-container>
-        <Virtuoso
-          useWindowScroll
-          data={stageGroups}
-          increaseViewportBy={{ top: 400, bottom: 800 }}
-          computeItemKey={(index, group) => group.stageId ? `${group.stageId}-${index}` : `group-${index}`}
-          itemContent={(_index, group) => {
-            const isCollapsed = stageCollapseOverrides.has(group.stageId)
-              ? stageCollapseOverrides.get(group.stageId)!
-              : shouldAutoCollapseStage(group, isActive);
-            const stageStreamingMap = streamingByStage.get(group.stageId);
+        {stageGroups.map((group) => {
+          const isCollapsed = stageCollapseOverrides.has(group.stageId)
+            ? stageCollapseOverrides.get(group.stageId)!
+            : shouldAutoCollapseStage(group, isActive);
+          const stageStreamingMap = streamingByStage.get(group.stageId);
 
-            return (
-              <Box>
-                {group.stageId && (
-                  <StageSeparator
-                    item={{
-                      id: `stage-sep-${group.stageId}`,
-                      type: 'stage_separator',
-                      stageId: group.stageId,
-                      content: group.stageName,
-                      metadata: {
-                        stage_index: group.stageIndex,
-                        stage_type: group.stageType,
-                        stage_status: group.stageStatus,
-                      },
-                      status: group.stageStatus,
-                      timestamp: '',
-                      sequenceNumber: 0,
-                    }}
-                    isCollapsed={isCollapsed}
-                    onToggleCollapse={() => {
-                      setStageCollapseOverrides((prev) => {
-                        const next = new Map(prev);
-                        next.set(group.stageId, !isCollapsed);
-                        return next;
-                      });
-                    }}
-                  />
-                )}
+          return (
+            <Box key={group.stageId || `group-${group.stageIndex}`}>
+              {group.stageId && (
+                <StageSeparator
+                  item={{
+                    id: `stage-sep-${group.stageId}`,
+                    type: 'stage_separator',
+                    stageId: group.stageId,
+                    content: group.stageName,
+                    metadata: {
+                      stage_index: group.stageIndex,
+                      stage_type: group.stageType,
+                      stage_status: group.stageStatus,
+                    },
+                    status: group.stageStatus,
+                    timestamp: '',
+                    sequenceNumber: 0,
+                  }}
+                  isCollapsed={isCollapsed}
+                  onToggleCollapse={() => {
+                    setStageCollapseOverrides((prev) => {
+                      const next = new Map(prev);
+                      next.set(group.stageId, !isCollapsed);
+                      return next;
+                    });
+                  }}
+                />
+              )}
 
-                <Collapse in={!isCollapsed} timeout={400}>
-                  <StageContent
-                    items={group.items}
-                    stageId={group.stageId}
-                    executionOverviews={stageMap.get(group.stageId)?.executions}
-                    streamingEvents={stageStreamingMap}
-                    shouldAutoCollapse={shouldAutoCollapse}
-                    onToggleItemExpansion={toggleItemExpansion}
-                    expandAllReasoning={expandAllReasoning}
-                    expandAllToolCalls={expandAllToolCalls}
-                    isItemCollapsible={isItemCollapsible}
-                    agentProgressStatuses={agentProgressStatuses}
-                    executionStatuses={executionStatuses}
-                    subAgentStreamingEvents={subAgentStreamingEvents}
-                    subAgentExecutionStatuses={subAgentExecutionStatuses}
-                    subAgentProgressStatuses={subAgentProgressStatuses}
-                    onSelectedAgentChange={handleSelectedAgentChange}
-                  />
-                </Collapse>
-              </Box>
-            );
-          }}
-        />
+              <Collapse in={!isCollapsed} timeout={400}>
+                <StageContent
+                  items={group.items}
+                  stageId={group.stageId}
+                  executionOverviews={stageMap.get(group.stageId)?.executions}
+                  streamingEvents={stageStreamingMap}
+                  shouldAutoCollapse={shouldAutoCollapse}
+                  onToggleItemExpansion={toggleItemExpansion}
+                  expandAllReasoning={expandAllReasoning}
+                  expandAllToolCalls={expandAllToolCalls}
+                  isItemCollapsible={isItemCollapsible}
+                  agentProgressStatuses={agentProgressStatuses}
+                  executionStatuses={executionStatuses}
+                  subAgentStreamingEvents={subAgentStreamingEvents}
+                  subAgentExecutionStatuses={subAgentExecutionStatuses}
+                  subAgentProgressStatuses={subAgentProgressStatuses}
+                  onSelectedAgentChange={handleSelectedAgentChange}
+                />
+              </Collapse>
+            </Box>
+          );
+        })}
 
-        {/* Ungrouped streaming events (no stageId), excluding executive_summary */}
-        {streamingByStage.get('__ungrouped__') &&
-          Array.from(streamingByStage.get('__ungrouped__')!.entries())
-            .filter(([, streamItem]) => streamItem.eventType !== TIMELINE_EVENT_TYPES.EXECUTIVE_SUMMARY)
-            .map(([eventId, streamItem]) => (
-              <StreamingContentRenderer key={eventId} item={streamItem} />
-            ))}
+        {/* Ungrouped streaming events (no stageId) */}
+        {ungroupedStreamingEntries.map(([eventId, streamItem]) => (
+          <StreamingContentRenderer key={eventId} item={streamItem} />
+        ))}
 
-        {/* Processing indicator for active sessions and chat stages */}
-        {(isActive || chatStageInProgress) && (() => {
-          let displayStatus = progressStatus || 'Processing...';
-
-          if (chatStageInProgress && !isActive) {
-            displayStatus = 'Processing...';
-          }
-
-          if (!selectedAgentExecutionId && agentProgressStatuses && agentProgressStatuses.size === 1) {
-            const singleAgentStatus = agentProgressStatuses.values().next().value;
-            if (singleAgentStatus) displayStatus = singleAgentStatus;
-          }
-
-          if (selectedAgentExecutionId) {
-            const agentStatus = agentProgressStatuses?.get(selectedAgentExecutionId);
-            if (agentStatus) {
-              displayStatus = agentStatus;
-            }
-
-            const wsEntry = executionStatuses?.get(selectedAgentExecutionId);
-            const isSelectedTerminal = (() => {
-              if (wsEntry && TERMINAL_EXECUTION_STATUSES.has(wsEntry.status)) return true;
-              for (const stage of stages) {
-                const eo = stage.executions?.find(e => e.execution_id === selectedAgentExecutionId);
-                if (eo && TERMINAL_EXECUTION_STATUSES.has(eo.status)) return true;
-              }
-              return false;
-            })();
-
-            if (isSelectedTerminal) {
-              const stageId = wsEntry?.stageId
-                || stages.find(s => s.executions?.some(e => e.execution_id === selectedAgentExecutionId))?.id;
-
-              if (stageId) {
-                const othersRunning =
-                  (executionStatuses ? Array.from(executionStatuses.entries()).some(
-                    ([id, entry]) =>
-                      id !== selectedAgentExecutionId &&
-                      entry.stageId === stageId &&
-                      !TERMINAL_EXECUTION_STATUSES.has(entry.status),
-                  ) : false) ||
-                  (stages.find(s => s.id === stageId)?.executions?.some(
-                    e => e.execution_id !== selectedAgentExecutionId &&
-                      !TERMINAL_EXECUTION_STATUSES.has(e.status),
-                  ) ?? false);
-
-                if (othersRunning) {
-                  displayStatus = 'Waiting for other agents...';
-                }
-              }
-            }
-          }
-          return <ProcessingIndicator message={displayStatus} />;
-        })()}
+        {/* Processing indicator */}
+        {showProcessingIndicator && <ProcessingIndicator message={displayStatus} />}
       </Box>
     </Card>
   );
