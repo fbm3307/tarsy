@@ -52,6 +52,135 @@ func TestIteratingController_HappyPath(t *testing.T) {
 	require.Equal(t, 2, llm.callCount)
 }
 
+func TestIteratingController_EmptyResponseRetry(t *testing.T) {
+	// LLM returns empty text on first attempt, then responds on retry.
+	llm := &mockLLMClient{
+		capture: true,
+		responses: []mockLLMResponse{
+			{chunks: []agent.Chunk{
+				&agent.UsageChunk{InputTokens: 5, OutputTokens: 0, TotalTokens: 5},
+			}},
+			{chunks: []agent.Chunk{
+				&agent.TextChunk{Content: "Here is my response."},
+				&agent.UsageChunk{InputTokens: 10, OutputTokens: 15, TotalTokens: 25},
+			}},
+		},
+	}
+
+	executor := &mockToolExecutor{tools: []agent.ToolDefinition{}}
+	execCtx := newTestExecCtx(t, llm, executor)
+	ctrl := NewIteratingController()
+
+	result, err := ctrl.Run(context.Background(), execCtx, "")
+	require.NoError(t, err)
+	require.Equal(t, agent.ExecutionStatusCompleted, result.Status)
+	require.Equal(t, "Here is my response.", result.FinalAnalysis)
+	require.Equal(t, 2, llm.callCount, "should retry after empty response")
+
+	// The retry message should be in the second call's messages
+	lastMessages := llm.capturedInputs[1].Messages
+	var lastUserMsg *agent.ConversationMessage
+	for i := len(lastMessages) - 1; i >= 0; i-- {
+		if lastMessages[i].Role == agent.RoleUser {
+			lastUserMsg = &lastMessages[i]
+			break
+		}
+	}
+	require.NotNil(t, lastUserMsg, "expected a user message in the retry call")
+	assert.Contains(t, lastUserMsg.Content, "empty")
+}
+
+func TestIteratingController_EmptyResponseRetry_ExhaustsRetries(t *testing.T) {
+	// LLM returns empty text every time; after maxEmptyResponseRetries we accept it.
+	responses := make([]mockLLMResponse, maxEmptyResponseRetries+1)
+	for i := range responses {
+		responses[i] = mockLLMResponse{chunks: []agent.Chunk{
+			&agent.UsageChunk{InputTokens: 5, OutputTokens: 0, TotalTokens: 5},
+		}}
+	}
+
+	llm := &mockLLMClient{responses: responses}
+	executor := &mockToolExecutor{tools: []agent.ToolDefinition{}}
+	execCtx := newTestExecCtx(t, llm, executor)
+	ctrl := NewIteratingController()
+
+	result, err := ctrl.Run(context.Background(), execCtx, "")
+	require.NoError(t, err)
+	require.Equal(t, agent.ExecutionStatusCompleted, result.Status)
+	require.Equal(t, "", result.FinalAnalysis, "should accept empty after retries exhausted")
+	require.Equal(t, maxEmptyResponseRetries+1, llm.callCount)
+}
+
+func TestIteratingController_EmptyResponseRetry_SkipsOnCancelledContext(t *testing.T) {
+	// When the context is cancelled, empty responses are a side-effect of
+	// stream closure — not a genuine empty reply. No retry should fire.
+	// The controller propagates the DB error from storeAssistantMessage;
+	// the caller (executor) maps it to the correct cancelled status.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	llm := &mockLLMClient{
+		responses: []mockLLMResponse{
+			{chunks: []agent.Chunk{
+				&agent.UsageChunk{InputTokens: 5, OutputTokens: 0, TotalTokens: 5},
+			}},
+		},
+		onGenerate: func(_ int) { cancel() },
+	}
+
+	executor := &mockToolExecutor{tools: []agent.ToolDefinition{}}
+	execCtx := newTestExecCtx(t, llm, executor)
+	ctrl := NewIteratingController()
+
+	_, err := ctrl.Run(ctx, execCtx, "")
+	require.Equal(t, 1, llm.callCount, "should NOT retry — context is cancelled")
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestIteratingController_EmptyResponseRetry_ResetsAcrossTurns(t *testing.T) {
+	// Empty response → retry → tool call → empty response again.
+	// The second empty occurrence must get fresh retries (counter was reset
+	// by the intervening tool-call turn).
+	llm := &mockLLMClient{
+		responses: []mockLLMResponse{
+			// Turn 1: empty response (emptyRetries → 1)
+			{chunks: []agent.Chunk{
+				&agent.UsageChunk{InputTokens: 2, OutputTokens: 0, TotalTokens: 2},
+			}},
+			// Turn 1 retry: tool call (emptyRetries reset → 0)
+			{chunks: []agent.Chunk{
+				&agent.ToolCallChunk{CallID: "call-1", Name: "test.tool", Arguments: "{}"},
+				&agent.UsageChunk{InputTokens: 5, OutputTokens: 5, TotalTokens: 10},
+			}},
+			// Turn 2: empty response again (emptyRetries → 1, NOT 2)
+			{chunks: []agent.Chunk{
+				&agent.UsageChunk{InputTokens: 3, OutputTokens: 0, TotalTokens: 3},
+			}},
+			// Turn 2 retry: final answer
+			{chunks: []agent.Chunk{
+				&agent.TextChunk{Content: "Done."},
+				&agent.UsageChunk{InputTokens: 8, OutputTokens: 10, TotalTokens: 18},
+			}},
+		},
+	}
+
+	tools := []agent.ToolDefinition{{Name: "test.tool", Description: "A test tool"}}
+	executor := &mockToolExecutor{
+		tools: tools,
+		results: map[string]*agent.ToolResult{
+			"test.tool": {Content: "tool result"},
+		},
+	}
+
+	execCtx := newTestExecCtx(t, llm, executor)
+	ctrl := NewIteratingController()
+
+	result, err := ctrl.Run(context.Background(), execCtx, "")
+	require.NoError(t, err)
+	require.Equal(t, agent.ExecutionStatusCompleted, result.Status)
+	require.Equal(t, "Done.", result.FinalAnalysis)
+	require.Equal(t, 4, llm.callCount, "2 empty + 1 tool call + 1 final = 4 calls")
+}
+
 func TestIteratingController_MultipleToolCalls(t *testing.T) {
 	// Single LLM response with multiple tool calls
 	llm := &mockLLMClient{
@@ -1145,6 +1274,63 @@ func TestIteratingController_FallbackInForcedConclusion(t *testing.T) {
 	// Third call should use fallback provider with ClearCache
 	require.Equal(t, "fallback-model", llm.capturedInputs[2].Config.Model)
 	require.True(t, llm.capturedInputs[2].ClearCache)
+}
+
+func TestIteratingController_ForcedConclusionEmptyRetry(t *testing.T) {
+	// maxIter=1 with a tool call consumes the iteration, triggering forced
+	// conclusion. First forced conclusion returns empty → retry → success.
+	llm := &mockLLMClient{
+		capture: true,
+		responses: []mockLLMResponse{
+			// Iteration 1: tool call (consumes the only iteration)
+			{chunks: []agent.Chunk{
+				&agent.ToolCallChunk{CallID: "call-1", Name: "test.tool", Arguments: "{}"},
+			}},
+			// Forced conclusion: empty response
+			{chunks: []agent.Chunk{
+				&agent.UsageChunk{InputTokens: 5, OutputTokens: 0, TotalTokens: 5},
+			}},
+			// Forced conclusion retry: success
+			{chunks: []agent.Chunk{
+				&agent.TextChunk{Content: "Final answer after retry."},
+				&agent.UsageChunk{InputTokens: 10, OutputTokens: 20, TotalTokens: 30},
+			}},
+		},
+	}
+
+	tools := []agent.ToolDefinition{{Name: "test.tool", Description: "A test tool"}}
+	executor := &mockToolExecutor{
+		tools: tools,
+		results: map[string]*agent.ToolResult{
+			"test.tool": {Content: "tool result"},
+		},
+	}
+
+	execCtx := newTestExecCtx(t, llm, executor)
+	execCtx.Config.MaxIterations = 1
+	execCtx.Config.LLMBackend = config.LLMBackendNativeGemini
+
+	ctrl := NewIteratingController()
+	result, err := ctrl.Run(context.Background(), execCtx, "")
+	require.NoError(t, err)
+	require.Equal(t, agent.ExecutionStatusCompleted, result.Status)
+	require.Equal(t, "Final answer after retry.", result.FinalAnalysis)
+	require.Equal(t, 3, llm.callCount)
+
+	// Tokens from both forced-conclusion attempts must be accumulated (5 + 30)
+	assert.Equal(t, 35, result.TokensUsed.TotalTokens)
+
+	// Verify the retry nudge was injected into the third call
+	lastMessages := llm.capturedInputs[2].Messages
+	var lastUserMsg *agent.ConversationMessage
+	for i := len(lastMessages) - 1; i >= 0; i-- {
+		if lastMessages[i].Role == agent.RoleUser {
+			lastUserMsg = &lastMessages[i]
+			break
+		}
+	}
+	require.NotNil(t, lastUserMsg, "expected a user message in the forced conclusion retry call")
+	assert.Contains(t, lastUserMsg.Content, "empty")
 }
 
 func TestIteratingController_NoFallbackWithEmptyList(t *testing.T) {

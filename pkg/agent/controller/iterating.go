@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/codeready-toolchain/tarsy/ent/llminteraction"
@@ -12,6 +13,10 @@ import (
 	"github.com/codeready-toolchain/tarsy/pkg/agent"
 	"github.com/codeready-toolchain/tarsy/pkg/events"
 )
+
+// maxEmptyResponseRetries is the number of times to retry when the LLM
+// returns an empty text response with no tool calls before accepting it.
+const maxEmptyResponseRetries = 2
 
 // IteratingController implements the multi-turn tool-calling loop.
 // Used by both google-native (Google SDK) and langchain (multi-provider) backends.
@@ -35,6 +40,7 @@ func (c *IteratingController) Run(
 	state := &agent.IterationState{MaxIterations: maxIter}
 	fbState := NewFallbackState(execCtx)
 	msgSeq := 0
+	emptyRetries := 0
 
 	// Initialize eventSeq from DB to avoid collisions with events created
 	// before this loop starts (e.g., task_assigned from orchestrator dispatch).
@@ -162,6 +168,7 @@ func (c *IteratingController) Run(
 
 		// Check for tool calls in response
 		if len(resp.ToolCalls) > 0 {
+			emptyRetries = 0
 			// Record text alongside tool calls (only if not already created by streaming)
 			if !streamed.TextEventCreated && resp.Text != "" {
 				createTimelineEvent(ctx, execCtx, timelineevent.EventTypeLlmResponse, resp.Text, nil, &eventSeq)
@@ -202,6 +209,7 @@ func (c *IteratingController) Run(
 		} else {
 			// No tool calls — check for pending sub-agents before treating as final
 			if collector := execCtx.SubAgentCollector; collector != nil && collector.HasPending() {
+				emptyRetries = 0
 				// Persist the assistant's intermediate response before waiting
 				assistantMsg, storeErr := storeAssistantMessage(ctx, execCtx, resp, &msgSeq)
 				if storeErr != nil {
@@ -228,6 +236,21 @@ func (c *IteratingController) Run(
 				}
 				messages = append(messages, msg)
 				storeObservationMessage(ctx, execCtx, msg.Content, &msgSeq)
+				iterCancel()
+				continue
+			}
+
+			// Empty response retry: if the LLM returned no text, nudge it to
+			// respond before accepting a blank final answer. Skip when the
+			// context is done - empty streams from cancellation are expected.
+			if strings.TrimSpace(resp.Text) == "" && emptyRetries < maxEmptyResponseRetries && ctx.Err() == nil {
+				emptyRetries++
+				slog.Warn("LLM returned empty response, retrying",
+					"session_id", execCtx.SessionID, "attempt", emptyRetries,
+					"max_attempts", maxEmptyResponseRetries)
+				retryMsg := "Your previous response was empty. Please provide a response."
+				messages = append(messages, agent.ConversationMessage{Role: agent.RoleUser, Content: retryMsg})
+				storeObservationMessage(ctx, execCtx, retryMsg, &msgSeq)
 				iterCancel()
 				continue
 			}
@@ -291,6 +314,7 @@ func (c *IteratingController) forceConclusion(
 	// On failure, attempt fallback to another provider before giving up.
 	var streamed *StreamedResponse
 	var err error
+	emptyRetries := 0
 	for {
 		if status, done := agent.StatusFromContextErr(ctx); done {
 			return &agent.ExecutionResult{
@@ -311,7 +335,19 @@ func (c *IteratingController) forceConclusion(
 		}, eventSeq, forcedMeta)
 		llmCancel()
 		if err == nil {
-			break
+			accumulateUsage(totalUsage, streamed.LLMResponse)
+			if strings.TrimSpace(streamed.LLMResponse.Text) != "" || emptyRetries >= maxEmptyResponseRetries || ctx.Err() != nil {
+				break
+			}
+			emptyRetries++
+			slog.Warn("LLM returned empty response during forced conclusion, retrying",
+				"session_id", execCtx.SessionID, "attempt", emptyRetries,
+				"max_attempts", maxEmptyResponseRetries)
+			retryMsg := "Your previous response was empty. Please provide a response."
+			messages = append(messages, agent.ConversationMessage{Role: agent.RoleUser, Content: retryMsg})
+			storeObservationMessage(ctx, execCtx, retryMsg, msgSeq)
+			startTime = time.Now()
+			continue
 		}
 		if !tryFallback(ctx, execCtx, fbState, err, eventSeq) {
 			createTimelineEvent(ctx, execCtx, timelineevent.EventTypeError, err.Error(), nil, eventSeq)
@@ -325,7 +361,6 @@ func (c *IteratingController) forceConclusion(
 	}
 	resp := streamed.LLMResponse
 
-	accumulateUsage(totalUsage, resp)
 	assistantMsg, storeErr := storeAssistantMessage(ctx, execCtx, resp, msgSeq)
 	if storeErr != nil {
 		createTimelineEvent(ctx, execCtx, timelineevent.EventTypeError,

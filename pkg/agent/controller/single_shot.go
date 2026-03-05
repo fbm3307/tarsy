@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/codeready-toolchain/tarsy/ent/llminteraction"
@@ -88,12 +90,14 @@ func (c *SingleShotController) Run(
 	// 3. Single LLM call with streaming (no tools), with fallback retry
 	var streamed *StreamedResponse
 	var err error
+	var totalUsage agent.TokenUsage
+	emptyRetries := 0
 	for {
 		if status, done := agent.StatusFromContextErr(ctx); done {
 			return &agent.ExecutionResult{
 				Status:     status,
 				Error:      fmt.Errorf("%s interrupted: %w", c.cfg.InteractionLabel, ctx.Err()),
-				TokensUsed: agent.TokenUsage{},
+				TokensUsed: totalUsage,
 			}, nil
 		}
 		streamed, err = callLLMWithStreaming(ctx, execCtx, execCtx.LLMClient, &agent.GenerateInput{
@@ -106,13 +110,37 @@ func (c *SingleShotController) Run(
 			ClearCache:  fbState.consumeClearCache(),
 		}, &eventSeq)
 		if err == nil {
-			break
+			accumulateUsage(&totalUsage, streamed.LLMResponse)
+			resp := streamed.LLMResponse
+			hasContent := strings.TrimSpace(resp.Text) != "" || (c.cfg.ThinkingFallback && strings.TrimSpace(resp.ThinkingText) != "")
+			if hasContent || emptyRetries >= maxEmptyResponseRetries {
+				break
+			}
+			emptyRetries++
+			slog.Warn("LLM returned empty response, retrying",
+				"session_id", execCtx.SessionID, "label", c.cfg.InteractionLabel,
+				"attempt", emptyRetries, "max_attempts", maxEmptyResponseRetries)
+			messages = append(messages, agent.ConversationMessage{
+				Role:    agent.RoleUser,
+				Content: "Your previous response was empty. Please provide a response.",
+			})
+			storeObservationMessage(ctx, execCtx, "Your previous response was empty. Please provide a response.", &msgSeq)
+			startTime = time.Now()
+			continue
 		}
 		if !tryFallback(ctx, execCtx, fbState, err, &eventSeq) {
 			createTimelineEvent(ctx, execCtx, timelineevent.EventTypeError, err.Error(), nil, &eventSeq)
 			return nil, fmt.Errorf("%s LLM call failed: %w", c.cfg.InteractionLabel, err)
 		}
 		startTime = time.Now()
+	}
+
+	if status, done := agent.StatusFromContextErr(ctx); done {
+		return &agent.ExecutionResult{
+			Status:     status,
+			Error:      fmt.Errorf("%s interrupted: %w", c.cfg.InteractionLabel, ctx.Err()),
+			TokensUsed: totalUsage,
+		}, nil
 	}
 	resp := streamed.LLMResponse
 
@@ -153,6 +181,6 @@ func (c *SingleShotController) Run(
 	return &agent.ExecutionResult{
 		Status:        agent.ExecutionStatusCompleted,
 		FinalAnalysis: finalAnalysis,
-		TokensUsed:    tokenUsageFromResp(resp),
+		TokensUsed:    totalUsage,
 	}, nil
 }
