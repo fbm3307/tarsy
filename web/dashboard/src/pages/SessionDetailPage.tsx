@@ -36,6 +36,7 @@ import {
 
 import { SharedHeader } from '../components/layout/SharedHeader.tsx';
 import { VersionFooter } from '../components/layout/VersionFooter.tsx';
+import { SessionSearchBar } from '../components/session/SessionSearchBar.tsx';
 import { FloatingSubmitAlertFab } from '../components/common/FloatingSubmitAlertFab.tsx';
 import InitializingSpinner from '../components/common/InitializingSpinner.tsx';
 import { useAdvancedAutoScroll } from '../hooks/useAdvancedAutoScroll.ts';
@@ -240,6 +241,10 @@ export function SessionDetailPage() {
       });
     }
   }, [chatState.chatStageId]);
+
+  // --- In-session search ---
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
 
   // --- Jump navigation ---
   const [expandCounter, setExpandCounter] = useState(0);
@@ -462,6 +467,41 @@ export function SessionDetailPage() {
     () => (session ? parseTimelineToFlow(timelineEvents, session.stages) : []),
     [timelineEvents, session],
   );
+
+  // --- In-session search: debounce + match computation ---
+  const isTerminal = session ? isTerminalStatus(session.status as SessionStatus) : false;
+
+  const matchingItemIds = useMemo(() => {
+    if (!debouncedSearchTerm.trim()) return [];
+    const lower = debouncedSearchTerm.toLowerCase();
+    return flowItems
+      .filter((item) => item.content && item.content.toLowerCase().includes(lower))
+      .map((item) => item.id);
+  }, [flowItems, debouncedSearchTerm]);
+
+  const handleSearchChange = useCallback((term: string) => {
+    setDebouncedSearchTerm(term);
+    setCurrentMatchIndex(0);
+  }, []);
+
+  const handleNextMatch = useCallback(() => {
+    if (matchingItemIds.length === 0) return;
+    setCurrentMatchIndex((prev) => (prev + 1) % matchingItemIds.length);
+  }, [matchingItemIds.length]);
+
+  const handlePrevMatch = useCallback(() => {
+    if (matchingItemIds.length === 0) return;
+    setCurrentMatchIndex((prev) => (prev - 1 + matchingItemIds.length) % matchingItemIds.length);
+  }, [matchingItemIds.length]);
+
+  // Scroll to the current match when index changes
+  useEffect(() => {
+    if (matchingItemIds.length === 0) return;
+    const targetId = matchingItemIds[currentMatchIndex];
+    if (!targetId) return;
+    const el = document.querySelector(`[data-flow-item-id="${targetId}"]`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [currentMatchIndex, matchingItemIds]);
 
   // Header title with session ID suffix (matching old dashboard)
   const headerTitle = session
@@ -1460,6 +1500,17 @@ export function SessionDetailPage() {
               </Box>
             )}
 
+            {/* In-session search bar (terminated sessions only) */}
+            {isTerminal && (
+              <SessionSearchBar
+                matchCount={matchingItemIds.length}
+                currentMatchIndex={currentMatchIndex}
+                onSearchChange={handleSearchChange}
+                onNextMatch={handleNextMatch}
+                onPrevMatch={handlePrevMatch}
+              />
+            )}
+
             {/* Conversation Timeline */}
             {(session.stages && session.stages.length > 0) || streamingEvents.size > 0 ? (
               <Suspense fallback={<TimelineSkeleton />}>
@@ -1477,6 +1528,7 @@ export function SessionDetailPage() {
                   chainId={session.chain_id}
                   chatStageInProgress={chatStageInProgress}
                   chatStageIds={chatStageIds}
+                  searchTerm={debouncedSearchTerm}
                 />
               </Suspense>
             ) : isActive ? (

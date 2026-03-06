@@ -4,6 +4,7 @@ import { ExpandMore, ExpandLess, Code, Search, Link as LinkIcon } from '@mui/ico
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { FLOW_ITEM, type FlowItem } from '../../utils/timelineParser';
+import { highlightSearchTermNodes } from '../../utils/search';
 
 interface CodeBlock {
   type: string;
@@ -15,6 +16,7 @@ interface CodeBlock {
 
 interface NativeToolItemProps {
   item: FlowItem;
+  searchTerm?: string;
 }
 
 /** Parse content preview summary for the header */
@@ -60,7 +62,7 @@ const OUTPUT_FONT = 'Consolas, Monaco, "Courier New", monospace';
  * NativeToolItem - renders code_execution, search_result, and url_context timeline events.
  * Uses info/teal color scheme to differentiate from MCP tool calls.
  */
-function NativeToolItem({ item }: NativeToolItemProps) {
+function NativeToolItem({ item, searchTerm }: NativeToolItemProps) {
   const [expanded, setExpanded] = useState(false);
   const theme = useTheme();
   const boxColor = theme.palette.info.main;
@@ -213,7 +215,7 @@ function NativeToolItem({ item }: NativeToolItemProps) {
                             wordBreak: 'break-word',
                           }}
                         >
-                          {block.content}
+                          {highlightSearchTermNodes(block.content, searchTerm ?? '')}
                         </pre>
                       </Box>
                     </Box>
@@ -315,7 +317,7 @@ function NativeToolItem({ item }: NativeToolItemProps) {
                       wordBreak: 'break-word',
                     }}
                   >
-                    {parsed.output}
+                    {highlightSearchTermNodes(parsed.output, searchTerm ?? '')}
                   </pre>
                 </Box>
               </Box>
@@ -379,7 +381,7 @@ function NativeToolItem({ item }: NativeToolItemProps) {
                     color: 'text.primary',
                   }}
                 >
-                  {idx + 1}. &quot;{query}&quot;
+                  {idx + 1}. &quot;{highlightSearchTermNodes(query, searchTerm ?? '')}&quot;
                 </Typography>
               ))}
             </Box>
@@ -397,7 +399,7 @@ function NativeToolItem({ item }: NativeToolItemProps) {
             whiteSpace: 'pre-wrap',
           }}
         >
-          {item.content}
+          {highlightSearchTermNodes(item.content, searchTerm ?? '')}
         </Typography>
       );
     }
@@ -427,7 +429,7 @@ function NativeToolItem({ item }: NativeToolItemProps) {
                         color: 'text.primary',
                       }}
                     >
-                      {url.title || 'Untitled'}
+                      {highlightSearchTermNodes(url.title || 'Untitled', searchTerm ?? '')}
                     </Typography>
                     <Typography
                       variant="caption"
@@ -438,7 +440,7 @@ function NativeToolItem({ item }: NativeToolItemProps) {
                         wordBreak: 'break-all',
                       }}
                     >
-                      {url.uri}
+                      {highlightSearchTermNodes(url.uri, searchTerm ?? '')}
                     </Typography>
                   </Box>
                 ),
@@ -458,20 +460,21 @@ function NativeToolItem({ item }: NativeToolItemProps) {
             whiteSpace: 'pre-wrap',
           }}
         >
-          {item.content}
+          {highlightSearchTermNodes(item.content, searchTerm ?? '')}
         </Typography>
       );
     }
 
     return (
       <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-        {item.content}
+        {highlightSearchTermNodes(item.content, searchTerm ?? '')}
       </Typography>
     );
   };
 
   return (
     <Box
+      data-flow-item-id={item.id}
       sx={{
         ml: 4,
         my: 1,
