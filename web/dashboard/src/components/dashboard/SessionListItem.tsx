@@ -27,6 +27,7 @@ import {
   Hub,
   Summarize,
   SwapHoriz,
+  BuildOutlined,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
@@ -135,7 +136,7 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
       </TableCell>
 
       {/* Session indicators: parallel, sub-agents, fallback, chat */}
-      <TableCell sx={{ width: 112, textAlign: 'right', px: 0.5 }}>
+      <TableCell sx={{ width: 130, textAlign: 'right', px: 0.5 }}>
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
           {session.has_parallel_stages && (
             <Tooltip title="Parallel Agents - Multiple agents run in parallel">
@@ -154,6 +155,17 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
                 icon={<Hub sx={{ fontSize: '0.875rem' }} />}
                 size="small"
                 color="secondary"
+                variant="outlined"
+                sx={iconOnlyChipSx}
+              />
+            </Tooltip>
+          )}
+          {session.has_action_stages && (
+            <Tooltip title="Action Evaluation - Automated remediation evaluated">
+              <Chip
+                icon={<BuildOutlined sx={{ fontSize: '0.875rem' }} />}
+                size="small"
+                color="success"
                 variant="outlined"
                 sx={iconOnlyChipSx}
               />
