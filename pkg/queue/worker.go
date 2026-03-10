@@ -233,22 +233,32 @@ func (w *Worker) pollAndProcess(ctx context.Context) error {
 	// 10. Stop heartbeat
 	cancelHeartbeat()
 
-	// 11. Update terminal status (use background context — session ctx may be cancelled)
+	// 11. Update terminal status + initialize review (atomic, background context)
 	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer finalizeCancel()
 
-	if err := w.updateSessionTerminalStatus(finalizeCtx, session, result); err != nil {
+	statusUpdated, reviewInitialized, err := w.updateSessionTerminalStatus(finalizeCtx, session, result)
+	if err != nil {
 		log.Error("Failed to update session terminal status", "error", err)
 		return err
+	}
+	if !statusUpdated {
+		log.Info("Terminal status already written by another worker, skipping downstream effects")
+		return nil
 	}
 
 	// 11a. Publish terminal session status event
 	w.publishSessionStatus(finalizeCtx, session.ID, result.Status)
 
-	// 11b. Send Slack terminal notification
+	// 11b. Publish review.status event (only when review was actually initialized)
+	if reviewInitialized {
+		w.publishReviewStatus(finalizeCtx, session.ID, result.Status)
+	}
+
+	// 11c. Send Slack terminal notification
 	w.notifySlackTerminal(finalizeCtx, session, result, slackThreadTS)
 
-	// 11c. Fire scoring (async, fire-and-forget) for completed sessions
+	// 11d. Fire scoring (async, fire-and-forget) for completed sessions
 	if result.Status == alertsession.StatusCompleted && w.scoringExecutor != nil {
 		w.scoringExecutor.ScoreSessionAsync(session.ID, "auto", true)
 	}
@@ -330,11 +340,32 @@ func (w *Worker) runHeartbeat(ctx context.Context, sessionID string) {
 	}
 }
 
-// updateSessionTerminalStatus writes the final session status.
-func (w *Worker) updateSessionTerminalStatus(ctx context.Context, session *ent.AlertSession, result *ExecutionResult) error {
-	update := w.client.AlertSession.UpdateOneID(session.ID).
+// updateSessionTerminalStatus writes the final session status and initializes
+// the review workflow atomically. Returns two booleans:
+//   - statusUpdated: true if the terminal status CAS succeeded (false = another worker won the race)
+//   - reviewInitialized: true if review_status was set (false = already set or status CAS lost)
+//
+// The caller should gate ALL downstream effects (events, Slack, scoring) on statusUpdated,
+// and gate review-specific events on reviewInitialized.
+func (w *Worker) updateSessionTerminalStatus(ctx context.Context, session *ent.AlertSession, result *ExecutionResult) (statusUpdated bool, reviewInitialized bool, err error) {
+	tx, err := w.client.Tx(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 1. Write terminal status as compare-and-set: only succeed from an active state.
+	now := time.Now()
+	update := tx.AlertSession.Update().
+		Where(
+			alertsession.IDEQ(session.ID),
+			alertsession.StatusIn(
+				alertsession.StatusInProgress,
+				alertsession.StatusCancelling,
+			),
+		).
 		SetStatus(result.Status).
-		SetCompletedAt(time.Now())
+		SetCompletedAt(now)
 
 	if result.FinalAnalysis != "" {
 		update = update.SetFinalAnalysis(result.FinalAnalysis)
@@ -349,7 +380,44 @@ func (w *Worker) updateSessionTerminalStatus(ctx context.Context, session *ent.A
 		update = update.SetErrorMessage(result.Error.Error())
 	}
 
-	return update.Exec(ctx)
+	statusAffected, err := update.Save(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("failed to update session terminal status: %w", err)
+	}
+	if statusAffected == 0 {
+		return false, false, nil
+	}
+
+	// 2. Initialize review_status (conditional on review_status IS NULL to avoid TOCTOU).
+	var reviewAffected int
+	if result.Status == alertsession.StatusCancelled {
+		reviewAffected, err = tx.AlertSession.Update().
+			Where(
+				alertsession.IDEQ(session.ID),
+				alertsession.ReviewStatusIsNil(),
+			).
+			SetReviewStatus(alertsession.ReviewStatusResolved).
+			SetResolvedAt(now).
+			SetResolutionReason(alertsession.ResolutionReasonDismissed).
+			Save(ctx)
+	} else {
+		reviewAffected, err = tx.AlertSession.Update().
+			Where(
+				alertsession.IDEQ(session.ID),
+				alertsession.ReviewStatusIsNil(),
+			).
+			SetReviewStatus(alertsession.ReviewStatusNeedsReview).
+			Save(ctx)
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("failed to initialize review status: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, false, fmt.Errorf("failed to commit terminal status: %w", err)
+	}
+
+	return true, reviewAffected > 0, nil
 }
 
 // publishSessionStatus publishes a session status event to both the session-specific
@@ -369,6 +437,25 @@ func (w *Worker) publishSessionStatus(ctx context.Context, sessionID string, sta
 		slog.Warn("Failed to publish session status",
 			"session_id", sessionID, "status", status, "error", err)
 	}
+}
+
+// publishReviewStatus publishes a review.status event to both the session-specific
+// and global channels. Non-blocking: errors are logged.
+//
+// TODO(phase2): Emit a real review.status event via w.eventPublisher using the
+// sessionID and computed reviewStatus as payload (mirror publishSessionStatus).
+// Publishing should be non-blocking; log errors instead of returning them.
+func (w *Worker) publishReviewStatus(_ context.Context, sessionID string, terminalStatus alertsession.Status) {
+	if w.eventPublisher == nil {
+		return
+	}
+
+	reviewStatus := alertsession.ReviewStatusNeedsReview
+	if terminalStatus == alertsession.StatusCancelled {
+		reviewStatus = alertsession.ReviewStatusResolved
+	}
+	slog.Info("Review status initialized",
+		"session_id", sessionID, "review_status", reviewStatus)
 }
 
 // scheduleEventCleanup schedules deletion of transient events after a 60-second
