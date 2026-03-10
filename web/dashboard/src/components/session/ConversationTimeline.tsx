@@ -23,7 +23,7 @@ import {
   isFlowItemTerminal,
   flowItemsToPlainText,
 } from '../../utils/timelineParser';
-import { TIMELINE_EVENT_TYPES, STAGE_TYPE } from '../../constants/eventTypes';
+import { TIMELINE_EVENT_TYPES, STAGE_TYPE, COLLAPSIBLE_STAGE_TYPES } from '../../constants/eventTypes';
 import StageSeparator from '../timeline/StageSeparator';
 import StageContent from '../timeline/StageContent';
 import StreamingContentRenderer from '../streaming/StreamingContentRenderer';
@@ -39,7 +39,7 @@ import { TERMINAL_EXECUTION_STATUSES } from '../../constants/sessionStatus';
  * can watch the reasoning flow in real time.
  */
 function shouldAutoCollapseStage(group: StageGroup, isSessionActive: boolean): boolean {
-  const isCollapsible = group.stageType === STAGE_TYPE.SYNTHESIS || group.stageType === STAGE_TYPE.EXEC_SUMMARY || group.stageType === STAGE_TYPE.ACTION;
+  const isCollapsible = !!group.stageType && COLLAPSIBLE_STAGE_TYPES.has(group.stageType);
   if (!isCollapsible) return false;
   if (isSessionActive) return false;
   return TERMINAL_EXECUTION_STATUSES.has(group.stageStatus);
@@ -271,12 +271,18 @@ export default function ConversationTimeline({
   }, [streamingByStage]);
 
   // --- Processing indicator display status ---
-  const showProcessingIndicator = isActive || !!chatStageInProgress;
+  const scoringInProgress = useMemo(
+    () => stageGroups.some(g => g.stageType === STAGE_TYPE.SCORING && !TERMINAL_EXECUTION_STATUSES.has(g.stageStatus)),
+    [stageGroups],
+  );
+  const showProcessingIndicator = isActive || !!chatStageInProgress || scoringInProgress;
 
   const displayStatus = useMemo(() => {
     let status = progressStatus || 'Processing...';
 
-    if (chatStageInProgress && !isActive) {
+    if (scoringInProgress) {
+      status = 'Evaluating quality…';
+    } else if (chatStageInProgress && !isActive) {
       status = 'Processing...';
     }
 
@@ -326,7 +332,7 @@ export default function ConversationTimeline({
     }
 
     return status;
-  }, [progressStatus, chatStageInProgress, isActive, selectedAgentExecutionId, agentProgressStatuses, executionStatuses, stages]);
+  }, [progressStatus, scoringInProgress, chatStageInProgress, isActive, selectedAgentExecutionId, agentProgressStatuses, executionStatuses, stages]);
 
   if (items.length === 0 && (!streamingEvents || streamingEvents.size === 0)) {
     // Session is active but no timeline items have arrived yet — show the

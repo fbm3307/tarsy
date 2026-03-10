@@ -105,6 +105,7 @@ describe('hasActiveFilters', () => {
     start_date: null,
     end_date: null,
     date_preset: null,
+    scoring_status: '',
   };
 
   it('returns false for default filters', () => {
@@ -133,6 +134,10 @@ describe('hasActiveFilters', () => {
 
   it('returns true when chain_id is set', () => {
     expect(hasActiveFilters({ ...defaultFilters, chain_id: 'test-chain' })).toBe(true);
+  });
+
+  it('returns true when scoring_status is set', () => {
+    expect(hasActiveFilters({ ...defaultFilters, scoring_status: 'scored' })).toBe(true);
   });
 
   it('returns true when start_date is set', () => {

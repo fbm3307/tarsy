@@ -36,7 +36,8 @@ import { StatusBadge } from '../common/StatusBadge.tsx';
 import { highlightSearchTermNodes } from '../../utils/search.ts';
 import { formatTimestamp, formatDurationMs } from '../../utils/format.ts';
 import TokenUsageDisplay from '../shared/TokenUsageDisplay.tsx';
-import { sessionDetailPath } from '../../constants/routes.ts';
+import { ScoreBadge } from '../common/ScoreBadge.tsx';
+import { sessionDetailPath, sessionScoringPath } from '../../constants/routes.ts';
 import { executiveSummaryMarkdownStyles } from '../../utils/markdownComponents.tsx';
 import type { DashboardSessionItem } from '../../types/session.ts';
 
@@ -244,6 +245,19 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
         <Typography variant="body2" color="text.secondary">
           {formatDurationMs(session.duration_ms)}
         </Typography>
+      </TableCell>
+
+      {/* Score — click navigates to scoring page when scoring was triggered */}
+      <TableCell
+        onClick={(e) => {
+          if (session.scoring_status || session.latest_score != null) {
+            e.stopPropagation();
+            navigate(sessionScoringPath(session.id));
+          }
+        }}
+        sx={session.scoring_status || session.latest_score != null ? { cursor: 'pointer' } : undefined}
+      >
+        <ScoreBadge score={session.latest_score} scoringStatus={session.scoring_status} variant="pill" showLabel={false} />
       </TableCell>
 
       {/* Tokens */}
