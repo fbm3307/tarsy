@@ -17,7 +17,8 @@ import {
   CircularProgress,
   Alert,
   Box,
-  Button,
+  Chip,
+  IconButton,
   TableSortLabel,
   Tooltip,
 } from '@mui/material';
@@ -29,10 +30,10 @@ import type { DashboardSessionItem } from '../../types/session.ts';
 import type { SessionFilter, PaginationState, SortState } from '../../types/dashboard.ts';
 
 /**
- * Column order: Status | Indicators | Type | Chain | Author | Time | Duration | Tokens | Actions
+ * Column order: Status | Indicators | Type | Author | Time | Duration | Eval Score | Tokens | Actions
  * Indicators column packs: parallel, sub-agents, action, fallback, chat (fixed-slot grid).
  */
-const TOTAL_COLUMNS = 10;
+const TOTAL_COLUMNS = 9;
 
 interface HistoricalAlertsListProps {
   sessions: DashboardSessionItem[];
@@ -62,30 +63,50 @@ export function HistoricalAlertsList({
   onPageSizeChange,
 }: HistoricalAlertsListProps) {
   return (
-    <Paper sx={{ p: 3 }}>
+    <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
       {/* Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 600 }}>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          px: 2,
+          py: 1,
+          backgroundColor: 'background.default',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+        }}
+      >
+        <Typography variant="subtitle2" fontWeight={600} sx={{ flexGrow: 1 }}>
           Alert History
-          <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 1 }}>
-            ({filteredCount.toLocaleString()} result{filteredCount !== 1 ? 's' : ''})
-          </Typography>
         </Typography>
-
-        <Button
-          variant="outlined"
+        <Chip
+          label={filteredCount.toLocaleString()}
           size="small"
-          startIcon={loading ? <CircularProgress size={16} /> : <Refresh />}
-          onClick={onRefresh}
-          disabled={loading}
-        >
-          {loading ? 'Loading...' : 'Refresh'}
-        </Button>
+          sx={{
+            height: 22,
+            minWidth: 28,
+            fontSize: '0.75rem',
+            fontWeight: 600,
+          }}
+        />
+        <Tooltip title="Refresh sessions">
+          <span>
+            <IconButton
+              size="small"
+              onClick={onRefresh}
+              disabled={loading}
+              aria-label="Refresh sessions"
+            >
+              {loading ? <CircularProgress size={16} /> : <Refresh fontSize="small" />}
+            </IconButton>
+          </span>
+        </Tooltip>
       </Box>
 
       {/* Error */}
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert severity="error" sx={{ mx: 2, mb: 1 }}>
           {error}
         </Alert>
       )}
@@ -98,7 +119,7 @@ export function HistoricalAlertsList({
       ) : (
         <>
           <TableContainer>
-            <Table>
+            <Table size="small">
               <TableHead>
                 <TableRow>
                   {/* Status — sortable */}
@@ -178,9 +199,6 @@ export function HistoricalAlertsList({
                       Type
                     </TableSortLabel>
                   </TableCell>
-
-                  {/* Agent Chain — not sortable (matches old dashboard column order) */}
-                  <TableCell sx={{ fontWeight: 600 }}>Agent Chain</TableCell>
 
                   {/* Submitted by — sortable */}
                   <TableCell sx={{ fontWeight: 600 }}>

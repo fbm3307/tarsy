@@ -20,6 +20,12 @@ import type {
   SendChatMessageResponse,
   SessionScoreResponse,
   ScoreSessionResponse,
+  TriageGroup,
+  TriageGroupKey,
+  TriageGroupParams,
+  UpdateReviewRequest,
+  UpdateReviewResponse,
+  ReviewActivityResponse,
 } from '../types/api.ts';
 import type {
   SessionDetailResponse,
@@ -165,6 +171,33 @@ export async function sendChatMessage(
   const response = await client.post<SendChatMessageResponse>(
     `/api/v1/sessions/${sessionId}/chat/messages`,
     { content },
+  );
+  return response.data;
+}
+
+// --- Triage / Review ---
+
+export async function getTriageGroup(group: TriageGroupKey, params?: TriageGroupParams): Promise<TriageGroup> {
+  const response = await retryOnTemporaryError(() =>
+    client.get<TriageGroup>(`/api/v1/sessions/triage/${group}`, { params }),
+  );
+  return response.data;
+}
+
+export async function updateReview(
+  sessionId: string,
+  req: UpdateReviewRequest,
+): Promise<UpdateReviewResponse> {
+  const response = await client.patch<UpdateReviewResponse>(
+    `/api/v1/sessions/${sessionId}/review`,
+    req,
+  );
+  return response.data;
+}
+
+export async function getReviewActivity(sessionId: string): Promise<ReviewActivityResponse> {
+  const response = await client.get<ReviewActivityResponse>(
+    `/api/v1/sessions/${sessionId}/review-activity`,
   );
   return response.data;
 }

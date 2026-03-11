@@ -84,6 +84,64 @@ export interface ScoreSessionResponse {
   score_id: string;
 }
 
+// --- Triage / Review ---
+
+export type TriageGroupKey = 'investigating' | 'needs_review' | 'in_progress' | 'resolved';
+
+/** Paginated response for a single triage group. */
+export interface TriageGroup {
+  count: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  sessions: DashboardSessionItem[];
+}
+
+/** Query parameters for GET /sessions/triage/:group. */
+export interface TriageGroupParams {
+  page?: number;
+  page_size?: number;
+  assignee?: string;
+}
+
+/** Allowed review workflow actions. */
+export type ReviewAction = 'claim' | 'unclaim' | 'resolve' | 'reopen' | 'update_note';
+
+/** Request body for PATCH /sessions/:id/review. */
+export interface UpdateReviewRequest {
+  action: ReviewAction;
+  resolution_reason?: string;
+  note?: string;
+}
+
+/** Response from PATCH /sessions/:id/review. */
+export interface UpdateReviewResponse {
+  id: string;
+  review_status: string;
+  assignee: string | null;
+  assigned_at: string | null;
+  resolved_at: string | null;
+  resolution_reason: string | null;
+  resolution_note: string | null;
+}
+
+/** Single entry in the review activity log. */
+export interface ReviewActivityItem {
+  id: string;
+  actor: string;
+  action: string;
+  from_status: string | null;
+  to_status: string;
+  resolution_reason?: string | null;
+  note?: string | null;
+  created_at: string;
+}
+
+/** Response from GET /sessions/:id/review-activity. */
+export interface ReviewActivityResponse {
+  activities: ReviewActivityItem[];
+}
+
 /** Chat message request. */
 export interface SendChatMessageRequest {
   content: string;

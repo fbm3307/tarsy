@@ -6,39 +6,31 @@
  * RFC3339 timestamps, `total_tokens` instead of `session_total_tokens`.
  */
 
-import { useState } from 'react';
 import {
   TableRow,
   TableCell,
   Typography,
-  IconButton,
   Tooltip,
   Chip,
   Box,
-  Popover,
-  Card,
-  Divider,
 } from '@mui/material';
 import {
-  OpenInNew,
   SmsOutlined as ChatIcon,
   CallSplit,
   FindInPage,
   Hub,
-  Summarize,
   SwapHoriz,
   BuildOutlined,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import { remarkPlugins } from '../../utils/markdownComponents';
 import { StatusBadge } from '../common/StatusBadge.tsx';
+import { SummaryTooltip } from './SummaryTooltip.tsx';
+import { ScoreCell } from './ScoreCell.tsx';
+import { OpenNewTabButton } from './OpenNewTabButton.tsx';
 import { highlightSearchTermNodes } from '../../utils/search.ts';
 import { formatTimestamp, formatDurationMs } from '../../utils/format.ts';
 import TokenUsageDisplay from '../shared/TokenUsageDisplay.tsx';
-import { ScoreBadge } from '../common/ScoreBadge.tsx';
-import { sessionDetailPath, sessionScoringPath } from '../../constants/routes.ts';
-import { executiveSummaryMarkdownStyles } from '../../utils/markdownComponents.tsx';
+import { sessionDetailPath } from '../../constants/routes.ts';
 import type { DashboardSessionItem } from '../../types/session.ts';
 
 interface SessionListItemProps {
@@ -55,22 +47,9 @@ const iconOnlyChipSx = {
 
 export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
   const navigate = useNavigate();
-  const [summaryAnchorEl, setSummaryAnchorEl] = useState<HTMLElement | null>(null);
-
-  const hasSummary =
-    session.executive_summary && session.executive_summary.trim().length > 0;
 
   const handleRowClick = () => {
     navigate(sessionDetailPath(session.id));
-  };
-
-  const handleNewTabClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    window.open(
-      `${window.location.origin}${sessionDetailPath(session.id)}`,
-      '_blank',
-      'noopener,noreferrer',
-    );
   };
 
   return (
@@ -83,56 +62,7 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
       <TableCell>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <StatusBadge status={session.status} />
-          {hasSummary && (
-            <>
-              <Chip
-                label="Summary"
-                size="small"
-                variant="outlined"
-                color="primary"
-                onMouseEnter={(e) => setSummaryAnchorEl(e.currentTarget)}
-                onMouseLeave={() => setSummaryAnchorEl(null)}
-                onClick={(e) => e.stopPropagation()}
-                sx={{
-                  cursor: 'pointer',
-                  height: 24,
-                  fontSize: '0.75rem',
-                  fontWeight: 500,
-                  transition: 'all 0.2s ease-in-out',
-                  '&:hover': (theme) => ({
-                    backgroundColor: `${theme.palette.grey[700]} !important`,
-                    color: `${theme.palette.common.white} !important`,
-                    borderColor: `${theme.palette.grey[700]} !important`,
-                  }),
-                }}
-              />
-              <Popover
-                sx={{ pointerEvents: 'none' }}
-                open={Boolean(summaryAnchorEl)}
-                anchorEl={summaryAnchorEl}
-                anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
-                transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-                onClose={() => setSummaryAnchorEl(null)}
-                disableRestoreFocus
-              >
-                <Card sx={{ maxWidth: 500, p: 2.5, boxShadow: 3 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-                    <Summarize color="primary" />
-                    <Typography
-                      variant="subtitle1"
-                      sx={{ fontWeight: 600, color: 'primary.main' }}
-                    >
-                      Executive Summary
-                    </Typography>
-                  </Box>
-                  <Divider sx={{ mb: 1.5 }} />
-                  <Box sx={executiveSummaryMarkdownStyles}>
-                    <ReactMarkdown remarkPlugins={remarkPlugins} skipHtml>{session.executive_summary}</ReactMarkdown>
-                  </Box>
-                </Card>
-              </Popover>
-            </>
-          )}
+          <SummaryTooltip summary={session.executive_summary ?? ''} />
         </Box>
       </TableCell>
 
@@ -219,11 +149,6 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
         </Typography>
       </TableCell>
 
-      {/* Agent Chain */}
-      <TableCell>
-        <Typography variant="body2">{session.chain_id}</Typography>
-      </TableCell>
-
       {/* Submitted by */}
       <TableCell>
         <Typography variant="body2" color="text.secondary">
@@ -248,17 +173,7 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
       </TableCell>
 
       {/* Score — click navigates to scoring page when scoring was triggered */}
-      <TableCell
-        onClick={(e) => {
-          if (session.scoring_status || session.latest_score != null) {
-            e.stopPropagation();
-            navigate(sessionScoringPath(session.id));
-          }
-        }}
-        sx={session.scoring_status || session.latest_score != null ? { cursor: 'pointer' } : undefined}
-      >
-        <ScoreBadge score={session.latest_score} scoringStatus={session.scoring_status} variant="pill" showLabel={false} />
-      </TableCell>
+      <ScoreCell sessionId={session.id} score={session.latest_score} scoringStatus={session.scoring_status} />
 
       {/* Tokens */}
       <TableCell>
@@ -282,15 +197,7 @@ export function SessionListItem({ session, searchTerm }: SessionListItemProps) {
 
       {/* Actions */}
       <TableCell sx={{ width: 60, textAlign: 'center' }}>
-        <Tooltip title="Open in new tab">
-          <IconButton
-            size="small"
-            onClick={handleNewTabClick}
-            sx={{ opacity: 0.7, '&:hover': { opacity: 1, backgroundColor: 'action.hover' } }}
-          >
-            <OpenInNew fontSize="small" />
-          </IconButton>
-        </Tooltip>
+        <OpenNewTabButton sessionId={session.id} />
       </TableCell>
     </TableRow>
   );

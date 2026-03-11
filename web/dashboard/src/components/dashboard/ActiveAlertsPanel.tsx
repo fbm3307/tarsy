@@ -12,11 +12,12 @@ import {
   Paper,
   Typography,
   Box,
-  Button,
+  IconButton,
   CircularProgress,
   Alert,
   Stack,
   Chip,
+  Tooltip,
 } from '@mui/material';
 import { Refresh, Wifi, WifiOff } from '@mui/icons-material';
 import { ActiveSessionCard } from './ActiveSessionCard.tsx';
@@ -44,61 +45,77 @@ export function ActiveAlertsPanel({
   onRefresh,
 }: ActiveAlertsPanelProps) {
   const totalCount = activeSessions.length + queuedSessions.length;
+  const isInitialLoad = loading && totalCount === 0;
+  const isErrorOnly = !!error && totalCount === 0;
+  const isEmpty = !error && totalCount === 0;
 
   return (
-    <Paper sx={{ p: 3, mb: 3 }}>
+    <Paper variant="outlined" sx={{ overflow: 'hidden', mb: 3 }}>
       {/* Panel Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Typography variant="h5" sx={{ fontWeight: 600 }}>
-            Active Alerts
-          </Typography>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          px: 2,
+          py: 1,
+          backgroundColor: 'background.default',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+        }}
+      >
+        <Typography variant="subtitle2" fontWeight={600} sx={{ flexGrow: 1 }}>
+          Active Alerts
+        </Typography>
 
-          {totalCount > 0 && (
-            <Chip label={totalCount} color="primary" size="small" sx={{ fontWeight: 600 }} />
-          )}
-
-          {/* WebSocket connection indicator */}
+        {totalCount > 0 && (
           <Chip
-            icon={
-              wsConnected ? (
-                <Wifi sx={{ fontSize: 16 }} />
-              ) : (
-                <WifiOff sx={{ fontSize: 16 }} />
-              )
-            }
-            label={wsConnected ? 'Live' : 'Offline'}
-            color={wsConnected ? 'success' : 'default'}
+            label={totalCount}
+            color="primary"
             size="small"
-            variant={wsConnected ? 'filled' : 'outlined'}
+            sx={{ height: 22, minWidth: 28, fontSize: '0.75rem', fontWeight: 600 }}
           />
-        </Box>
+        )}
 
-        <Button
-          variant="outlined"
+        <Chip
+          icon={
+            wsConnected ? (
+              <Wifi sx={{ fontSize: 16 }} />
+            ) : (
+              <WifiOff sx={{ fontSize: 16 }} />
+            )
+          }
+          label={wsConnected ? 'Live' : 'Offline'}
+          color={wsConnected ? 'success' : 'default'}
           size="small"
-          startIcon={loading ? <CircularProgress size={16} /> : <Refresh />}
-          onClick={onRefresh}
-          disabled={loading}
-        >
-          {loading ? 'Loading...' : 'Refresh'}
-        </Button>
+          variant={wsConnected ? 'filled' : 'outlined'}
+        />
+
+        <Tooltip title="Refresh alerts">
+          <span>
+            <IconButton size="small" onClick={onRefresh} disabled={loading} aria-label="Refresh alerts">
+              {loading ? <CircularProgress size={16} /> : <Refresh fontSize="small" />}
+            </IconButton>
+          </span>
+        </Tooltip>
       </Box>
 
       {/* Error */}
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert severity="error" sx={{ mx: 2, mt: 1.5 }}>
           {error}
         </Alert>
       )}
 
-      {/* Loading state */}
-      {loading && totalCount === 0 ? (
+      {isInitialLoad && (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
           <CircularProgress />
         </Box>
-      ) : totalCount === 0 ? (
-        /* Empty state */
+      )}
+
+      {!isInitialLoad && isErrorOnly && null}
+
+      {!isInitialLoad && isEmpty && (
         <Box sx={{ py: 6, textAlign: 'center' }}>
           <Typography variant="h6" color="text.secondary" gutterBottom>
             No Active Alerts
@@ -107,16 +124,16 @@ export function ActiveAlertsPanel({
             All alerts are currently completed or there are no alerts in the system.
           </Typography>
         </Box>
-      ) : (
-        <>
-          {/* Queued Alerts Accordion */}
+      )}
+
+      {!isInitialLoad && !isErrorOnly && totalCount > 0 && (
+        <Box sx={{ p: 2 }}>
           {queuedSessions.length > 0 && (
             <Box sx={{ mb: 2 }}>
               <QueuedAlertsSection sessions={queuedSessions} onRefresh={onRefresh} />
             </Box>
           )}
 
-          {/* Active Session Cards */}
           {activeSessions.length > 0 && (
             <Stack spacing={2}>
               {activeSessions.map((session) => (
@@ -129,7 +146,6 @@ export function ActiveAlertsPanel({
             </Stack>
           )}
 
-          {/* Summary footer */}
           <Box sx={{ mt: 2, pt: 2, borderTop: 1, borderColor: 'divider' }}>
             <Typography variant="body2" color="text.secondary">
               {activeSessions.length > 0 && `${activeSessions.length} active`}
@@ -138,7 +154,7 @@ export function ActiveAlertsPanel({
               {wsConnected && ' • Live updates enabled'}
             </Typography>
           </Box>
-        </>
+        </Box>
       )}
     </Paper>
   );

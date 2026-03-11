@@ -28,11 +28,14 @@ import {
   MenuItem,
   ListItemIcon,
   ListItemText,
+  ToggleButtonGroup,
+  ToggleButton,
 } from '@mui/material';
 import { Refresh, Menu as MenuIcon, Send as SendIcon, Dns as DnsIcon } from '@mui/icons-material';
 import { FilterPanel } from './FilterPanel.tsx';
 import { ActiveAlertsPanel } from './ActiveAlertsPanel.tsx';
 import { HistoricalAlertsList } from './HistoricalAlertsList.tsx';
+import { TriageView } from './TriageView.tsx';
 import { useAuth } from '../../contexts/AuthContext.tsx';
 import { LoginButton } from '../auth/LoginButton.tsx';
 import { UserMenu } from '../auth/UserMenu.tsx';
@@ -42,6 +45,8 @@ import {
   getSessions,
   getActiveSessions,
   getFilterOptions,
+  getTriageGroup,
+  updateReview,
   handleAPIError,
 } from '../../services/api.ts';
 import { websocketService } from '../../services/websocket.ts';
@@ -49,10 +54,11 @@ import {
   EVENT_SESSION_STATUS,
   EVENT_SESSION_PROGRESS,
   EVENT_SESSION_SCORE_UPDATED,
+  EVENT_REVIEW_STATUS,
 } from '../../constants/eventTypes.ts';
-import type { SessionFilter, PaginationState, SortState } from '../../types/dashboard.ts';
+import type { SessionFilter, PaginationState, SortState, DashboardTab, TriageFilter } from '../../types/dashboard.ts';
 import type { DashboardSessionItem, ActiveSessionItem, QueuedSessionItem } from '../../types/session.ts';
-import type { DashboardListParams } from '../../types/api.ts';
+import type { DashboardListParams, TriageGroup, TriageGroupKey, TriageGroupParams } from '../../types/api.ts';
 import type { FilterOptionsResponse } from '../../types/system.ts';
 import type { SessionProgressPayload } from '../../types/events.ts';
 import {
@@ -66,9 +72,19 @@ import {
   getDefaultPagination,
   getDefaultSort,
   mergeWithDefaults,
+  saveDashboardTab,
+  loadDashboardTab,
+  saveTriageFilters,
+  loadTriageFilters,
+  getDefaultTriageFilters,
 } from '../../utils/filterPersistence.ts';
 const REFRESH_THROTTLE_MS = 1000;
 const FILTER_DEBOUNCE_MS = 300;
+const TRIAGE_GROUPS: TriageGroupKey[] = ['investigating', 'needs_review', 'in_progress', 'resolved'];
+
+const EMPTY_TRIAGE: Record<TriageGroupKey, TriageGroup | null> = {
+  investigating: null, needs_review: null, in_progress: null, resolved: null,
+};
 
 /**
  * Build query params from the current filter + pagination + sort state.
@@ -111,7 +127,7 @@ function buildQueryParams(
 }
 
 export function DashboardView() {
-  const { isAuthenticated, authAvailable } = useAuth();
+  const { isAuthenticated, authAvailable, user } = useAuth();
 
   // ── Navigation menu state ──
   const [menuAnchorEl, setMenuAnchorEl] = useState<null | HTMLElement>(null);
@@ -160,12 +176,24 @@ export function DashboardView() {
   // ── WebSocket connection status ──
   const [wsConnected, setWsConnected] = useState(false);
 
+  // ── Tab state (persisted) ──
+  const [activeTab, setActiveTab] = useState<DashboardTab>(loadDashboardTab);
+
+  // ── Triage state ──
+  const [triageGroups, setTriageGroups] = useState<Record<TriageGroupKey, TriageGroup | null>>({ ...EMPTY_TRIAGE });
+  const [triageLoading, setTriageLoading] = useState(false);
+  const [triageError, setTriageError] = useState<string | null>(null);
+  const [triageFilters, setTriageFilters] = useState<TriageFilter>(() =>
+    mergeWithDefaults(loadTriageFilters(), getDefaultTriageFilters()),
+  );
+
   // ── Refs for stable callbacks & stale-update detection ──
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeReconnRef = useRef(false);
   const historicalReconnRef = useRef(false);
   const mountedRef = useRef(false); // suppress effect-based fetches on first render
+  const triageFilterInitRef = useRef(true); // skip first triage-filter effect (initial fetch handles it)
   const filtersRef = useRef(filters);
   const paginationRef = useRef(pagination);
   const sortRef = useRef(sortState);
@@ -281,12 +309,92 @@ export function DashboardView() {
     fetchHistoricalRetryRef.current = fetchHistoricalWithRetry;
   }, [fetchHistoricalWithRetry]);
 
-  // ── Throttled refresh ──
+  // ── Triage data fetching ──
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  const triageFiltersRef = useRef(triageFilters);
+  useEffect(() => {
+    triageFiltersRef.current = triageFilters;
+  }, [triageFilters]);
+
+  const userEmailRef = useRef(user?.email);
+  useEffect(() => {
+    userEmailRef.current = user?.email;
+  }, [user?.email]);
+
+  const triageGroupsRef = useRef(triageGroups);
+  useEffect(() => {
+    triageGroupsRef.current = triageGroups;
+  }, [triageGroups]);
+
+  const triageRequestIdRef = useRef(0);
+
+  const buildTriageParams = useCallback((groupKey?: TriageGroupKey): TriageGroupParams => {
+    const assignee =
+      triageFiltersRef.current.assignee === 'mine' ? (userEmailRef.current || undefined) :
+      triageFiltersRef.current.assignee === 'unassigned' ? '' :
+      undefined;
+    const params: TriageGroupParams = {};
+    if (assignee !== undefined) params.assignee = assignee;
+    if (groupKey) {
+      const current = triageGroupsRef.current[groupKey];
+      if (current) params.page_size = current.page_size;
+    }
+    return params;
+  }, []);
+
+  const fetchAllTriageGroups = useCallback(async () => {
+    const requestId = ++triageRequestIdRef.current;
+    try {
+      setTriageLoading(true);
+      setTriageError(null);
+      const results = await Promise.all(
+        TRIAGE_GROUPS.map(g => getTriageGroup(g, buildTriageParams(g))),
+      );
+      if (requestId !== triageRequestIdRef.current) return;
+      setTriageGroups({
+        investigating: results[0],
+        needs_review: results[1],
+        in_progress: results[2],
+        resolved: results[3],
+      });
+    } catch (err) {
+      if (requestId !== triageRequestIdRef.current) return;
+      setTriageError(handleAPIError(err));
+    } finally {
+      if (requestId === triageRequestIdRef.current) {
+        setTriageLoading(false);
+      }
+    }
+  }, [buildTriageParams]);
+
+  const fetchSingleTriageGroup = useCallback(async (groupKey: TriageGroupKey, extraParams?: Partial<TriageGroupParams>) => {
+    try {
+      const params = { ...buildTriageParams(groupKey), ...extraParams };
+      const data = await getTriageGroup(groupKey, params);
+      setTriageGroups(prev => ({ ...prev, [groupKey]: data }));
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  }, [buildTriageParams]);
+
+  const fetchAllTriageGroupsRef = useRef(fetchAllTriageGroups);
+  useEffect(() => {
+    fetchAllTriageGroupsRef.current = fetchAllTriageGroups;
+  }, [fetchAllTriageGroups]);
+
+  // ── Throttled refresh (sessions + triage together) ──
   const throttledRefresh = useCallback(() => {
     if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
     refreshTimeoutRef.current = setTimeout(() => {
       fetchActiveAlerts();
       fetchHistoricalAlerts();
+      if (activeTabRef.current === 'triage') {
+        fetchAllTriageGroupsRef.current();
+      }
       refreshTimeoutRef.current = null;
     }, REFRESH_THROTTLE_MS);
   }, [fetchActiveAlerts, fetchHistoricalAlerts]);
@@ -304,6 +412,9 @@ export function DashboardView() {
     mountedRef.current = true;
     fetchActiveAlerts();
     fetchHistoricalAlerts();
+    if (activeTabRef.current === 'triage') {
+      fetchAllTriageGroups();
+    }
 
     (async () => {
       try {
@@ -360,9 +471,8 @@ export function DashboardView() {
         return;
       }
 
-      // session.status → throttled full refresh
+      // session.status → throttled refresh (sessions + triage together)
       if (type === EVENT_SESSION_STATUS) {
-        // Clean progress data for sessions that just completed
         const sessionId = data.session_id as string | undefined;
         if (sessionId) {
           setProgressData((prev) => {
@@ -378,6 +488,15 @@ export function DashboardView() {
       // session.score_updated → throttled refresh to pick up spinner / final score
       if (type === EVENT_SESSION_SCORE_UPDATED) {
         throttledRefreshRef.current();
+        return;
+      }
+
+      // review.status → triage refresh only (if tab active)
+      if (type === EVENT_REVIEW_STATUS) {
+        if (activeTabRef.current === 'triage') {
+          fetchAllTriageGroupsRef.current();
+        }
+        return;
       }
     };
 
@@ -386,6 +505,9 @@ export function DashboardView() {
       if (connected) {
         fetchActiveRetryRef.current();
         fetchHistoricalRetryRef.current();
+        if (activeTabRef.current === 'triage') {
+          fetchAllTriageGroupsRef.current();
+        }
       }
     };
 
@@ -452,6 +574,89 @@ export function DashboardView() {
   const handleWebSocketRetry = () => {
     websocketService.connect();
   };
+
+  // ── Tab switching ──
+
+  const handleTabChange = (_: React.MouseEvent<HTMLElement>, newValue: DashboardTab | null) => {
+    if (!newValue) return;
+    setActiveTab(newValue);
+    saveDashboardTab(newValue);
+    if (newValue === 'triage') {
+      fetchAllTriageGroups();
+    }
+  };
+
+  // ── Triage filter / action callbacks ──
+
+  const handleTriageFiltersChange = (newFilters: TriageFilter) => {
+    setTriageFilters(newFilters);
+    saveTriageFilters(newFilters);
+  };
+
+  // Refetch when triage filters change (skip first run — initial fetch handles it)
+  useEffect(() => {
+    if (triageFilterInitRef.current) {
+      triageFilterInitRef.current = false;
+      return;
+    }
+    if (activeTabRef.current === 'triage') {
+      fetchAllTriageGroups();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [triageFilters]);
+
+  const handleTriageClaim = async (sessionId: string) => {
+    try {
+      await updateReview(sessionId, { action: 'claim' });
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleTriageUnclaim = async (sessionId: string) => {
+    try {
+      await updateReview(sessionId, { action: 'unclaim' });
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleTriageResolve = async (sessionId: string, reason: string, note?: string) => {
+    try {
+      await updateReview(sessionId, { action: 'resolve', resolution_reason: reason, note });
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleTriageReopen = async (sessionId: string) => {
+    try {
+      await updateReview(sessionId, { action: 'reopen' });
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleTriageUpdateNote = async (sessionId: string, note: string) => {
+    try {
+      await updateReview(sessionId, { action: 'update_note', note: note || undefined });
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleTriagePageChange = useCallback((group: TriageGroupKey, page: number) => {
+    fetchSingleTriageGroup(group, { page });
+  }, [fetchSingleTriageGroup]);
+
+  const handleTriagePageSizeChange = useCallback((group: TriageGroupKey, pageSize: number) => {
+    fetchSingleTriageGroup(group, { page: 1, page_size: pageSize });
+  }, [fetchSingleTriageGroup]);
 
   // ────────────────────────────────────────────────────────────
   // Render
@@ -611,6 +816,50 @@ export function DashboardView() {
               </Tooltip>
             )}
 
+            {/* Sessions / Triage toggle */}
+            <ToggleButtonGroup
+              value={activeTab}
+              exclusive
+              onChange={handleTabChange}
+              size="small"
+              aria-label="Dashboard tabs"
+              sx={{
+                mr: 2,
+                bgcolor: 'rgba(255,255,255,0.1)',
+                borderRadius: 3,
+                padding: 0.5,
+                border: '1px solid rgba(255,255,255,0.2)',
+                '& .MuiToggleButton-root': {
+                  color: 'rgba(255,255,255,0.8)',
+                  border: 'none',
+                  borderRadius: 2,
+                  px: 2,
+                  py: 0.5,
+                  minWidth: 100,
+                  fontWeight: 500,
+                  fontSize: '0.875rem',
+                  textTransform: 'none',
+                  transition: 'all 0.2s ease-in-out',
+                  '&:hover': {
+                    bgcolor: 'rgba(255,255,255,0.15)',
+                    color: 'rgba(255,255,255,0.95)',
+                  },
+                  '&.Mui-selected': {
+                    bgcolor: 'rgba(255,255,255,0.25)',
+                    color: '#fff',
+                    fontWeight: 600,
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                    '&:hover': {
+                      bgcolor: 'rgba(255,255,255,0.3)',
+                    },
+                  },
+                },
+              }}
+            >
+              <ToggleButton value="sessions">Sessions</ToggleButton>
+              <ToggleButton value="triage">Triage</ToggleButton>
+            </ToggleButtonGroup>
+
             {/* Connection Status Indicator - Fancy LIVE / Offline badge */}
             <Tooltip
               title={
@@ -720,42 +969,62 @@ export function DashboardView() {
         </MenuItem>
       </Menu>
 
-      {/* Filter Panel */}
-      <FilterPanel
-        filters={filters}
-        onFiltersChange={handleFiltersChange}
-        onClearFilters={handleClearFilters}
-        filterOptions={filterOptions}
-      />
+      {/* Sessions tab content */}
+      {activeTab === 'sessions' && (
+        <>
+          <FilterPanel
+            filters={filters}
+            onFiltersChange={handleFiltersChange}
+            onClearFilters={handleClearFilters}
+            filterOptions={filterOptions}
+          />
 
-      {/* Main content area */}
-      <Box sx={{ mt: 2 }}>
-        {/* Active Alerts Panel */}
-        <ActiveAlertsPanel
-          activeSessions={activeSessions}
-          queuedSessions={queuedSessions}
-          progressData={progressData}
-          loading={activeLoading}
-          error={activeError}
-          wsConnected={wsConnected}
-          onRefresh={handleRefreshActive}
-        />
+          <Box sx={{ mt: 2 }}>
+            <ActiveAlertsPanel
+              activeSessions={activeSessions}
+              queuedSessions={queuedSessions}
+              progressData={progressData}
+              loading={activeLoading}
+              error={activeError}
+              wsConnected={wsConnected}
+              onRefresh={handleRefreshActive}
+            />
 
-        {/* Historical Alerts Table */}
-        <HistoricalAlertsList
-          sessions={historicalSessions}
-          loading={historicalLoading}
-          error={historicalError}
-          filters={filters}
-          filteredCount={pagination.totalItems}
-          sortState={sortState}
-          pagination={pagination}
-          onRefresh={handleRefreshHistorical}
-          onSortChange={handleSortChange}
-          onPageChange={handlePageChange}
-          onPageSizeChange={handlePageSizeChange}
+            <HistoricalAlertsList
+              sessions={historicalSessions}
+              loading={historicalLoading}
+              error={historicalError}
+              filters={filters}
+              filteredCount={pagination.totalItems}
+              sortState={sortState}
+              pagination={pagination}
+              onRefresh={handleRefreshHistorical}
+              onSortChange={handleSortChange}
+              onPageChange={handlePageChange}
+              onPageSizeChange={handlePageSizeChange}
+            />
+          </Box>
+        </>
+      )}
+
+      {/* Triage tab content */}
+      {activeTab === 'triage' && (
+        <TriageView
+          groups={triageGroups}
+          loading={triageLoading}
+          error={triageError}
+          filters={triageFilters}
+          onFiltersChange={handleTriageFiltersChange}
+          onRefresh={fetchAllTriageGroups}
+          onClaim={handleTriageClaim}
+          onUnclaim={handleTriageUnclaim}
+          onResolve={handleTriageResolve}
+          onReopen={handleTriageReopen}
+          onUpdateNote={handleTriageUpdateNote}
+          onPageChange={handleTriagePageChange}
+          onPageSizeChange={handleTriagePageSizeChange}
         />
-      </Box>
+      )}
 
       {/* Version footer */}
       <VersionFooter />

@@ -467,7 +467,7 @@ var (
 	SessionReviewActivitiesColumns = []*schema.Column{
 		{Name: "activity_id", Type: field.TypeString, Unique: true},
 		{Name: "actor", Type: field.TypeString},
-		{Name: "action", Type: field.TypeEnum, Enums: []string{"claim", "unclaim", "resolve", "reopen"}},
+		{Name: "action", Type: field.TypeEnum, Enums: []string{"claim", "unclaim", "resolve", "reopen", "update_note"}},
 		{Name: "from_status", Type: field.TypeEnum, Nullable: true, Enums: []string{"needs_review", "in_progress", "resolved"}},
 		{Name: "to_status", Type: field.TypeEnum, Enums: []string{"needs_review", "in_progress", "resolved"}},
 		{Name: "resolution_reason", Type: field.TypeEnum, Nullable: true, Enums: []string{"actioned", "dismissed"}},
@@ -550,6 +550,11 @@ var (
 				Name:    "sessionscore_session_id_status",
 				Unique:  false,
 				Columns: []*schema.Column{SessionScoresColumns[10], SessionScoresColumns[6]},
+			},
+			{
+				Name:    "sessionscore_session_id_started_at",
+				Unique:  false,
+				Columns: []*schema.Column{SessionScoresColumns[10], SessionScoresColumns[7]},
 			},
 			{
 				Name:    "sessionscore_status_started_at",

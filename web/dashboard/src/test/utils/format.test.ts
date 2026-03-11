@@ -1,7 +1,7 @@
 /**
  * Tests for format.ts
  *
- * Covers: formatTimestamp, formatDurationMs, formatTokens, formatTokensCompact
+ * Covers: formatTimestamp, formatDurationMs, formatTokens, formatTokensCompact, compactTimeAgo
  */
 
 import {
@@ -9,6 +9,7 @@ import {
   formatDurationMs,
   formatTokens,
   formatTokensCompact,
+  compactTimeAgo,
   timeAgo,
   liveDuration,
 } from '../../utils/format';
@@ -166,6 +167,94 @@ describe('formatTokens', () => {
 
   it('formats small numbers', () => {
     expect(formatTokens(42)).toBe('42');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compactTimeAgo
+// ---------------------------------------------------------------------------
+
+describe('compactTimeAgo', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('returns "—" for null/undefined', () => {
+    expect(compactTimeAgo(null)).toBe('—');
+    expect(compactTimeAgo(undefined)).toBe('—');
+  });
+
+  it('returns "—" for invalid dates', () => {
+    expect(compactTimeAgo('not-a-date')).toBe('—');
+  });
+
+  it('returns "0s" for future timestamps', () => {
+    vi.setSystemTime(new Date('2025-06-15T12:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:01:00Z')).toBe('0s');
+  });
+
+  it('formats exact seconds', () => {
+    vi.setSystemTime(new Date('2025-06-15T12:00:30Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('30s');
+  });
+
+  it('boundary: 59 seconds stays in seconds', () => {
+    vi.setSystemTime(new Date('2025-06-15T12:00:59Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('59s');
+  });
+
+  it('boundary: 60 seconds flips to minutes', () => {
+    vi.setSystemTime(new Date('2025-06-15T12:01:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('1m');
+  });
+
+  it('formats exact minutes', () => {
+    vi.setSystemTime(new Date('2025-06-15T12:05:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('5m');
+  });
+
+  it('boundary: 59 minutes stays in minutes', () => {
+    vi.setSystemTime(new Date('2025-06-15T12:59:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('59m');
+  });
+
+  it('boundary: 60 minutes flips to hours', () => {
+    vi.setSystemTime(new Date('2025-06-15T13:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('1h');
+  });
+
+  it('formats exact hours', () => {
+    vi.setSystemTime(new Date('2025-06-15T15:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('3h');
+  });
+
+  it('boundary: 23 hours stays in hours', () => {
+    vi.setSystemTime(new Date('2025-06-16T11:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('23h');
+  });
+
+  it('boundary: 24 hours flips to days', () => {
+    vi.setSystemTime(new Date('2025-06-16T12:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('1d');
+  });
+
+  it('formats exact days', () => {
+    vi.setSystemTime(new Date('2025-06-20T12:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('5d');
+  });
+
+  it('boundary: 29 days stays in days', () => {
+    vi.setSystemTime(new Date('2025-07-14T12:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('29d');
+  });
+
+  it('boundary: 30 days flips to months', () => {
+    vi.setSystemTime(new Date('2025-07-15T12:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('1mo');
+  });
+
+  it('formats exact months', () => {
+    vi.setSystemTime(new Date('2025-08-14T12:00:00Z'));
+    expect(compactTimeAgo('2025-06-15T12:00:00Z')).toBe('2mo');
   });
 });
 
