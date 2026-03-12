@@ -12,6 +12,7 @@ import (
 	"github.com/codeready-toolchain/tarsy/ent/timelineevent"
 	"github.com/codeready-toolchain/tarsy/pkg/agent"
 	"github.com/codeready-toolchain/tarsy/pkg/events"
+	"github.com/codeready-toolchain/tarsy/pkg/metrics"
 	"github.com/codeready-toolchain/tarsy/pkg/models"
 )
 
@@ -36,9 +37,10 @@ type PartialOutputError struct {
 	Cause           error
 	PartialText     string
 	PartialThinking string
-	IsLoop          bool         // true when caused by degenerate loop detection
-	Code            LLMErrorCode // error code from LLM service
-	Retryable       bool         // whether the LLM service considers the error retryable
+	IsLoop          bool              // true when caused by degenerate loop detection
+	Code            LLMErrorCode      // error code from LLM service
+	Retryable       bool              // whether the LLM service considers the error retryable
+	Usage           *agent.TokenUsage // partial token usage accumulated before the error
 }
 
 func (e *PartialOutputError) Error() string { return e.Cause.Error() }
@@ -251,6 +253,7 @@ loop:
 					PartialThinking: thinkingBuf.String(),
 					Code:            LLMErrorCode(c.Code),
 					Retryable:       c.Retryable,
+					Usage:           resp.Usage,
 				}
 			}
 
@@ -270,6 +273,7 @@ loop:
 				PartialThinking: thinkingBuf.String(),
 				Code:            code,
 				Retryable:       true,
+				Usage:           resp.Usage,
 			}
 		}
 	}
@@ -283,6 +287,7 @@ loop:
 			PartialText:     resp.Text,
 			PartialThinking: resp.ThinkingText,
 			IsLoop:          true,
+			Usage:           resp.Usage,
 		}
 	}
 
@@ -300,6 +305,38 @@ type StreamedResponse struct {
 	// TextEventCreated is true if a streaming llm_response timeline event
 	// was created (and completed) during the LLM call.
 	TextEventCreated bool
+}
+
+// MetricsTokens converts the token usage into a metrics-safe struct, or nil if
+// the receiver or embedded LLMResponse is nil. Safe to call on a nil
+// *StreamedResponse.
+func (s *StreamedResponse) MetricsTokens() *metrics.LLMTokens {
+	if s == nil || s.LLMResponse == nil || s.Usage == nil {
+		return nil
+	}
+	return &metrics.LLMTokens{
+		Input:    s.Usage.InputTokens,
+		Output:   s.Usage.OutputTokens,
+		Thinking: s.Usage.ThinkingTokens,
+	}
+}
+
+// metricsTokens extracts token usage from a successful response or, when the
+// response is nil, from a PartialOutputError so that partial-failure LLM calls
+// still report consumed tokens.
+func metricsTokens(resp *StreamedResponse, err error) *metrics.LLMTokens {
+	if t := resp.MetricsTokens(); t != nil {
+		return t
+	}
+	var poe *PartialOutputError
+	if errors.As(err, &poe) && poe.Usage != nil {
+		return &metrics.LLMTokens{
+			Input:    poe.Usage.InputTokens,
+			Output:   poe.Usage.OutputTokens,
+			Thinking: poe.Usage.ThinkingTokens,
+		}
+	}
+	return nil
 }
 
 // callLLMWithStreaming performs an LLM call with real-time streaming of chunks

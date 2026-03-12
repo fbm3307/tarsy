@@ -989,3 +989,70 @@ func TestCallLLMWithStreaming_ChunkBatching(t *testing.T) {
 		assert.False(t, resp.ThinkingEventCreated)
 	})
 }
+
+// ============================================================================
+// MetricsTokens tests
+// ============================================================================
+
+func TestStreamedResponse_MetricsTokens(t *testing.T) {
+	t.Run("nil receiver", func(t *testing.T) {
+		var s *StreamedResponse
+		assert.Nil(t, s.MetricsTokens())
+	})
+
+	t.Run("nil LLMResponse", func(t *testing.T) {
+		s := &StreamedResponse{}
+		assert.Nil(t, s.MetricsTokens())
+	})
+
+	t.Run("nil Usage", func(t *testing.T) {
+		s := &StreamedResponse{LLMResponse: &LLMResponse{Usage: nil}}
+		assert.Nil(t, s.MetricsTokens())
+	})
+
+	t.Run("converts usage", func(t *testing.T) {
+		s := &StreamedResponse{LLMResponse: &LLMResponse{
+			Usage: &agent.TokenUsage{
+				InputTokens: 100, OutputTokens: 200, ThinkingTokens: 50,
+			},
+		}}
+		tokens := s.MetricsTokens()
+		require.NotNil(t, tokens)
+		assert.Equal(t, 100, tokens.Input)
+		assert.Equal(t, 200, tokens.Output)
+		assert.Equal(t, 50, tokens.Thinking)
+	})
+}
+
+func TestMetricsTokens(t *testing.T) {
+	t.Run("prefers response tokens", func(t *testing.T) {
+		resp := &StreamedResponse{LLMResponse: &LLMResponse{
+			Usage: &agent.TokenUsage{InputTokens: 10, OutputTokens: 20},
+		}}
+		tokens := metricsTokens(resp, nil)
+		require.NotNil(t, tokens)
+		assert.Equal(t, 10, tokens.Input)
+		assert.Equal(t, 20, tokens.Output)
+	})
+
+	t.Run("extracts from PartialOutputError", func(t *testing.T) {
+		poe := &PartialOutputError{
+			Cause: fmt.Errorf("stream error"),
+			Usage: &agent.TokenUsage{InputTokens: 5, OutputTokens: 3, ThinkingTokens: 1},
+		}
+		tokens := metricsTokens(nil, poe)
+		require.NotNil(t, tokens)
+		assert.Equal(t, 5, tokens.Input)
+		assert.Equal(t, 3, tokens.Output)
+		assert.Equal(t, 1, tokens.Thinking)
+	})
+
+	t.Run("nil when no usage anywhere", func(t *testing.T) {
+		poe := &PartialOutputError{Cause: fmt.Errorf("error")}
+		assert.Nil(t, metricsTokens(nil, poe))
+	})
+
+	t.Run("nil on non-PartialOutputError", func(t *testing.T) {
+		assert.Nil(t, metricsTokens(nil, fmt.Errorf("generic error")))
+	})
+}
