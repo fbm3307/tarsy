@@ -1,7 +1,7 @@
 /**
  * ScoringPage — dedicated view for session scoring reports.
  *
- * Shows: total score, score analysis (markdown), missing tools report (markdown),
+ * Shows: total score, score analysis (markdown), tool improvement report (markdown),
  * re-score button, and back link to session detail.
  */
 
@@ -356,13 +356,13 @@ export function ScoringPage() {
                 </Paper>
               )}
 
-              {/* Missing Tools Report */}
-              {score?.missing_tools_analysis && (
+              {/* Tool Improvement Report */}
+              {score?.tool_improvement_report && (
                 <Paper sx={{ p: 3 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
                     <BuildOutlined color="warning" />
                     <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                      Missing Tools Report
+                      Tool Improvement Report
                     </Typography>
                   </Box>
                   <Divider sx={{ mb: 2 }} />
@@ -372,7 +372,7 @@ export function ScoringPage() {
                       components={finalAnswerMarkdownComponents}
                       skipHtml
                     >
-                      {score.missing_tools_analysis}
+                      {score.tool_improvement_report}
                     </ReactMarkdown>
                   </Box>
                 </Paper>
