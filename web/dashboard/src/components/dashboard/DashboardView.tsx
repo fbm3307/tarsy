@@ -58,7 +58,8 @@ import {
 } from '../../constants/eventTypes.ts';
 import type { SessionFilter, PaginationState, SortState, DashboardTab, TriageFilter } from '../../types/dashboard.ts';
 import type { DashboardSessionItem, ActiveSessionItem, QueuedSessionItem } from '../../types/session.ts';
-import type { DashboardListParams, TriageGroup, TriageGroupKey, TriageGroupParams } from '../../types/api.ts';
+import { REVIEW_ACTION } from '../../types/api.ts';
+import type { DashboardListParams, TriageGroup, TriageGroupKey, TriageGroupParams, UpdateReviewResponse } from '../../types/api.ts';
 import type { FilterOptionsResponse } from '../../types/system.ts';
 import type { SessionProgressPayload } from '../../types/events.ts';
 import {
@@ -605,36 +606,64 @@ export function DashboardView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [triageFilters]);
 
-  const handleTriageClaim = async (sessionId: string) => {
+  const checkReviewResults = (resp: UpdateReviewResponse) => {
+    const failures = resp.results.filter((r) => !r.success);
+    if (failures.length > 0) {
+      const msg = failures.length === 1
+        ? `Failed for session ${failures[0].session_id}: ${failures[0].error}`
+        : `Failed for ${failures.length} sessions: ${failures.map((f) => f.error).join('; ')}`;
+      setTriageError(msg);
+    }
+  };
+
+  const handleBulkTriageClaim = async (sessionIds: string[]) => {
     try {
-      await updateReview(sessionId, { action: 'claim' });
+      const resp = await updateReview({ session_ids: sessionIds, action: REVIEW_ACTION.CLAIM });
+      checkReviewResults(resp);
       fetchAllTriageGroups();
     } catch (err) {
       setTriageError(handleAPIError(err));
     }
   };
 
-  const handleTriageUnclaim = async (sessionId: string) => {
+  const handleBulkTriageUnclaim = async (sessionIds: string[]) => {
     try {
-      await updateReview(sessionId, { action: 'unclaim' });
+      const resp = await updateReview({ session_ids: sessionIds, action: REVIEW_ACTION.UNCLAIM });
+      checkReviewResults(resp);
       fetchAllTriageGroups();
     } catch (err) {
       setTriageError(handleAPIError(err));
     }
   };
+
+  const handleBulkTriageResolve = async (sessionIds: string[], reason: string, note?: string) => {
+    try {
+      const resp = await updateReview({ session_ids: sessionIds, action: REVIEW_ACTION.RESOLVE, resolution_reason: reason, note });
+      checkReviewResults(resp);
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleBulkTriageReopen = async (sessionIds: string[]) => {
+    try {
+      const resp = await updateReview({ session_ids: sessionIds, action: REVIEW_ACTION.REOPEN });
+      checkReviewResults(resp);
+      fetchAllTriageGroups();
+    } catch (err) {
+      setTriageError(handleAPIError(err));
+    }
+  };
+
+  const handleTriageClaim = (sessionId: string) => handleBulkTriageClaim([sessionId]);
+  const handleTriageUnclaim = (sessionId: string) => handleBulkTriageUnclaim([sessionId]);
+  const handleTriageReopen = (sessionId: string) => handleBulkTriageReopen([sessionId]);
 
   const handleTriageResolve = async (sessionId: string, reason: string, note?: string) => {
     try {
-      await updateReview(sessionId, { action: 'resolve', resolution_reason: reason, note });
-      fetchAllTriageGroups();
-    } catch (err) {
-      setTriageError(handleAPIError(err));
-    }
-  };
-
-  const handleTriageReopen = async (sessionId: string) => {
-    try {
-      await updateReview(sessionId, { action: 'reopen' });
+      const resp = await updateReview({ session_ids: [sessionId], action: REVIEW_ACTION.RESOLVE, resolution_reason: reason, note });
+      checkReviewResults(resp);
       fetchAllTriageGroups();
     } catch (err) {
       setTriageError(handleAPIError(err));
@@ -643,7 +672,8 @@ export function DashboardView() {
 
   const handleTriageUpdateNote = async (sessionId: string, note: string) => {
     try {
-      await updateReview(sessionId, { action: 'update_note', note: note || undefined });
+      const resp = await updateReview({ session_ids: [sessionId], action: REVIEW_ACTION.UPDATE_NOTE, note: note || undefined });
+      checkReviewResults(resp);
       fetchAllTriageGroups();
     } catch (err) {
       setTriageError(handleAPIError(err));
@@ -1021,6 +1051,10 @@ export function DashboardView() {
           onResolve={handleTriageResolve}
           onReopen={handleTriageReopen}
           onUpdateNote={handleTriageUpdateNote}
+          onBulkClaim={handleBulkTriageClaim}
+          onBulkResolve={handleBulkTriageResolve}
+          onBulkUnclaim={handleBulkTriageUnclaim}
+          onBulkReopen={handleBulkTriageReopen}
           onPageChange={handleTriagePageChange}
           onPageSizeChange={handleTriagePageSizeChange}
         />
