@@ -5,6 +5,7 @@ import TypewriterText from './TypewriterText';
 import ContentCard from '../shared/ContentCard';
 import { TIMELINE_EVENT_TYPES } from '../../constants/eventTypes';
 import { TOOL_TYPE } from '../../constants/toolTypes';
+import { getSkillNamesLabel } from '../../utils/format';
 import { thoughtMarkdownComponents, remarkPlugins } from '../../utils/markdownComponents';
 
 /**
@@ -232,6 +233,14 @@ const StreamingContentRenderer = memo(({ item }: StreamingContentRendererProps) 
     const toolName = (item.metadata?.tool_name as string) || 'unknown';
     const isSkill = (item.metadata?.tool_type as string) === TOOL_TYPE.SKILL;
     const paletteKey = isSkill ? 'info' : 'primary';
+
+    let displayName = toolName;
+    let statusLabel = 'Executing...';
+    if (isSkill) {
+      displayName = 'Loading Skills';
+      statusLabel = getSkillNamesLabel(item.metadata?.arguments) ?? 'Loading...';
+    }
+
     return (
       <Box sx={{ ml: 4, my: 1, mr: 1 }}>
         <Box
@@ -272,10 +281,10 @@ const StreamingContentRenderer = memo(({ item }: StreamingContentRendererProps) 
               color: theme.palette[paletteKey].main,
             })}
           >
-            {toolName}
+            {displayName}
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.8rem', flex: 1 }}>
-            {isSkill ? 'Loading skill...' : 'Executing...'}
+            {statusLabel}
           </Typography>
         </Box>
       </Box>

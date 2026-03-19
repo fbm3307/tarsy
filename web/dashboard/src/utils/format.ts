@@ -114,6 +114,27 @@ export function liveDuration(startIso: string | null | undefined): string {
 }
 
 // ────────────────────────────────────────────────────────────
+// Skill names
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Extract skill names from raw load_skill arguments (JSON string or parsed object).
+ * Returns a comma-separated label, or null when the arguments don't contain skill names.
+ */
+export function getSkillNamesLabel(rawArgs: unknown): string | null {
+  let parsed: unknown;
+  if (typeof rawArgs === 'string') {
+    try { parsed = JSON.parse(rawArgs); } catch { return null; }
+  } else {
+    parsed = rawArgs;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const names = (parsed as Record<string, unknown>).names;
+  if (!Array.isArray(names) || names.length === 0) return null;
+  return (names as string[]).join(', ');
+}
+
+// ────────────────────────────────────────────────────────────
 // Tokens
 // ────────────────────────────────────────────────────────────
 

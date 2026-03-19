@@ -4,7 +4,7 @@ import { ExpandMore, ExpandLess, CheckCircle, Error as ErrorIcon, InfoOutlined, 
 import ReactMarkdown from 'react-markdown';
 import JsonDisplay from '../shared/JsonDisplay';
 import CopyButton from '../shared/CopyButton';
-import { formatDurationMs } from '../../utils/format';
+import { formatDurationMs, getSkillNamesLabel } from '../../utils/format';
 import { highlightSearchTermNodes } from '../../utils/search';
 import { remarkPlugins, thoughtMarkdownComponents } from '../../utils/markdownComponents';
 import { rehypeSearchHighlight } from '../../utils/rehypeSearchHighlight';
@@ -112,7 +112,11 @@ function ToolCallItem({ item, expandAll = false, searchTerm }: ToolCallItemProps
     [searchTerm],
   );
 
+  const skillNamesLabel = isSkill ? getSkillNamesLabel(toolArguments) : null;
+  const displayName = isSkill ? 'Loaded Skills' : toolName;
+
   const getArgumentsPreview = (): string => {
+    if (skillNamesLabel) return skillNamesLabel;
     if (!toolArguments || typeof toolArguments !== 'object') return '';
     const keys = Object.keys(toolArguments);
     if (keys.length === 0) return '(no arguments)';
@@ -161,7 +165,7 @@ function ToolCallItem({ item, expandAll = false, searchTerm }: ToolCallItemProps
       >
         <StatusIcon sx={(theme) => ({ fontSize: 18, color: theme.palette[accentKey].main })} />
         <Typography variant="body2" sx={(theme) => ({ fontFamily: 'monospace', fontWeight: 600, fontSize: '0.9rem', color: theme.palette[accentKey].main })}>
-          {searchTerm ? highlightSearchTermNodes(toolName, searchTerm) : toolName}
+          {searchTerm ? highlightSearchTermNodes(displayName, searchTerm) : displayName}
         </Typography>
         <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.8rem', flex: 1, lineHeight: 1.4 }}>
           {getArgumentsPreview()}
