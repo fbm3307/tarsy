@@ -407,6 +407,26 @@ func (s *StageService) ForceStageFailure(ctx context.Context, stageID string, er
 	return nil
 }
 
+// SetActionsExecuted records whether the action agent in this stage executed
+// any remediation tools. The update is constrained to action-type stages;
+// returns ErrNotFound if the stage doesn't exist or isn't an action stage.
+func (s *StageService) SetActionsExecuted(_ context.Context, stageID string, executed bool) error {
+	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	n, err := s.client.Stage.Update().
+		Where(stage.IDEQ(stageID), stage.StageTypeEQ(stage.StageTypeAction)).
+		SetActionsExecuted(executed).
+		Save(writeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to set actions_executed on stage %s: %w", stageID, err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetStageByID retrieves a stage by ID with optional edges
 func (s *StageService) GetStageByID(ctx context.Context, stageID string, withEdges bool) (*ent.Stage, error) {
 	query := s.client.Stage.Query().Where(stage.IDEQ(stageID))
