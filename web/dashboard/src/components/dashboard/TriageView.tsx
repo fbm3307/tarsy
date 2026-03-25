@@ -12,7 +12,9 @@ import { TriageGroupedList } from './TriageGroupedList.tsx';
 import { CompleteReviewModal } from './CompleteReviewModal.tsx';
 import { EditFeedbackModal } from './EditFeedbackModal.tsx';
 import { getRatingConfig } from '../../constants/ratingConfig.ts';
-import type { TriageGroup, TriageGroupKey } from '../../types/api.ts';
+import { getSession } from '../../services/api.ts';
+import { REVIEW_MODAL_MODE, getReviewModalMode } from '../../types/api.ts';
+import type { TriageGroup, TriageGroupKey, ReviewModalMode } from '../../types/api.ts';
 import type { TriageFilter } from '../../types/dashboard.ts';
 import type { DashboardSessionItem } from '../../types/session.ts';
 
@@ -65,7 +67,7 @@ export function TriageView({
   const [completeSessionIds, setCompleteSessionIds] = useState<string[] | null>(null);
   const [reviewTarget, setReviewTarget] = useState<{
     session: DashboardSessionItem;
-    mode: 'complete' | 'edit';
+    mode: ReviewModalMode;
   } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [snackbar, setSnackbar] = useState<SnackbarState | null>(null);
@@ -91,7 +93,7 @@ export function TriageView({
   };
 
   const handleReviewClick = useCallback((session: DashboardSessionItem) => {
-    const mode = session.quality_rating ? 'edit' : 'complete';
+    const mode = getReviewModalMode(session.review_status);
     setReviewTarget({ session, mode });
   }, []);
 
@@ -162,11 +164,43 @@ export function TriageView({
     withAction(() => onBulkReopen(sessionIds));
   };
 
+  const findSessionInGroups = useCallback((sessionId: string): DashboardSessionItem | undefined => {
+    for (const g of Object.values(groups)) {
+      const found = g?.sessions.find(s => s.id === sessionId);
+      if (found) return found;
+    }
+    return undefined;
+  }, [groups]);
+
   // --- Snackbar actions (snackbar mode only) ---
-  const handleSnackbarAddFeedback = () => {
+  const handleSnackbarAddFeedback = async () => {
     if (!snackbar?.completedSession) return;
-    setReviewTarget({ session: snackbar.completedSession, mode: 'edit' });
+    const stale = snackbar.completedSession;
     setSnackbar(null);
+
+    const fresh = findSessionInGroups(stale.id);
+    if (fresh) {
+      setReviewTarget({ session: fresh, mode: REVIEW_MODAL_MODE.EDIT });
+      return;
+    }
+
+    try {
+      const detail = await getSession(stale.id);
+      setReviewTarget({
+        session: {
+          ...stale,
+          review_status: detail.review_status,
+          assignee: detail.assignee,
+          quality_rating: detail.quality_rating,
+          action_taken: detail.action_taken,
+          investigation_feedback: detail.investigation_feedback,
+          feedback_edited: detail.feedback_edited,
+        },
+        mode: REVIEW_MODAL_MODE.EDIT,
+      });
+    } catch {
+      setReviewTarget({ session: stale, mode: REVIEW_MODAL_MODE.EDIT });
+    }
   };
 
   const handleSnackbarUndo = () => {
@@ -250,15 +284,17 @@ export function TriageView({
 
       {/* Single-session review modals (from Review column click) */}
       <CompleteReviewModal
-        open={reviewTarget?.mode === 'complete'}
+        open={reviewTarget?.mode === REVIEW_MODAL_MODE.COMPLETE}
         onClose={() => setReviewTarget(null)}
         onComplete={handleReviewComplete}
         loading={actionLoading}
         title={reviewTarget?.session.alert_type ? `Review: ${reviewTarget.session.alert_type}` : undefined}
         executiveSummary={reviewTarget?.session.executive_summary}
+        assignee={reviewTarget?.session.assignee}
+        feedbackEdited={reviewTarget?.session.feedback_edited}
       />
       <EditFeedbackModal
-        open={reviewTarget?.mode === 'edit'}
+        open={reviewTarget?.mode === REVIEW_MODAL_MODE.EDIT}
         onClose={() => setReviewTarget(null)}
         onSave={handleReviewSave}
         loading={actionLoading}
@@ -266,6 +302,8 @@ export function TriageView({
         initialActionTaken={reviewTarget?.session.action_taken ?? ''}
         initialInvestigationFeedback={reviewTarget?.session.investigation_feedback ?? ''}
         executiveSummary={reviewTarget?.session.executive_summary}
+        assignee={reviewTarget?.session.assignee}
+        feedbackEdited={reviewTarget?.session.feedback_edited}
       />
 
       {/* Bulk complete modal */}

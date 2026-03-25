@@ -280,12 +280,33 @@ func (s *SessionService) doClaim(ctx context.Context, tx *ent.Tx, sessionID, act
 	if err != nil {
 		return fmt.Errorf("failed to reassign session: %w", err)
 	}
+	if affected > 0 {
+		return s.insertActivity(ctx, tx, sessionID, actor,
+			sessionreviewactivity.ActionClaim,
+			ptrFromStatus(sessionreviewactivity.FromStatusInProgress),
+			sessionreviewactivity.ToStatusInProgress,
+			nil, nil, nil, now)
+	}
+
+	// Try claim from NULL review_status (session still investigating or pre-migration).
+	affected, err = tx.AlertSession.Update().
+		Where(
+			alertsession.IDEQ(sessionID),
+			alertsession.ReviewStatusIsNil(),
+		).
+		SetReviewStatus(alertsession.ReviewStatusInProgress).
+		SetAssignee(actor).
+		SetAssignedAt(now).
+		Save(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to claim session from uninitialized state: %w", err)
+	}
 	if affected == 0 {
 		return ErrConflict
 	}
 	return s.insertActivity(ctx, tx, sessionID, actor,
 		sessionreviewactivity.ActionClaim,
-		ptrFromStatus(sessionreviewactivity.FromStatusInProgress),
+		nil,
 		sessionreviewactivity.ToStatusInProgress,
 		nil, nil, nil, now)
 }
@@ -339,27 +360,47 @@ func (s *SessionService) doComplete(ctx context.Context, tx *ent.Tx, sessionID, 
 	if err != nil {
 		return fmt.Errorf("failed to direct-complete review: %w", err)
 	}
+	if affected > 0 {
+		// Two activity rows: implicit claim + completion.
+		// Use distinct timestamps so ORDER BY created_at is deterministic.
+		// PostgreSQL timestamptz has microsecond precision, so delta must be >= 1µs.
+		claimTime := now
+		completeTime := now.Add(time.Microsecond)
+		if err := s.insertActivity(ctx, tx, sessionID, actor,
+			sessionreviewactivity.ActionClaim,
+			ptrFromStatus(sessionreviewactivity.FromStatusNeedsReview),
+			sessionreviewactivity.ToStatusInProgress,
+			nil, nil, nil, claimTime); err != nil {
+			return err
+		}
+		return s.insertActivity(ctx, tx, sessionID, actor,
+			sessionreviewactivity.ActionComplete,
+			ptrFromStatus(sessionreviewactivity.FromStatusInProgress),
+			sessionreviewactivity.ToStatusReviewed,
+			&rating, actionTaken, feedback, completeTime)
+	}
+
+	// Try complete from NULL review_status (session still investigating or pre-migration).
+	update = buildUpdate(tx.AlertSession.Update().Where(
+		alertsession.IDEQ(sessionID),
+		alertsession.ReviewStatusIsNil(),
+	)).
+		SetAssignee(actor).
+		SetAssignedAt(now)
+
+	affected, err = update.Save(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to complete review from uninitialized state: %w", err)
+	}
 	if affected == 0 {
 		return ErrConflict
 	}
 
-	// Two activity rows: implicit claim + completion.
-	// Use distinct timestamps so ORDER BY created_at is deterministic.
-	// PostgreSQL timestamptz has microsecond precision, so delta must be >= 1µs.
-	claimTime := now
-	completeTime := now.Add(time.Microsecond)
-	if err := s.insertActivity(ctx, tx, sessionID, actor,
-		sessionreviewactivity.ActionClaim,
-		ptrFromStatus(sessionreviewactivity.FromStatusNeedsReview),
-		sessionreviewactivity.ToStatusInProgress,
-		nil, nil, nil, claimTime); err != nil {
-		return err
-	}
 	return s.insertActivity(ctx, tx, sessionID, actor,
 		sessionreviewactivity.ActionComplete,
-		ptrFromStatus(sessionreviewactivity.FromStatusInProgress),
+		nil,
 		sessionreviewactivity.ToStatusReviewed,
-		&rating, actionTaken, feedback, completeTime)
+		&rating, actionTaken, feedback, now)
 }
 
 // insertActivity creates a SessionReviewActivity record within the transaction.
@@ -483,6 +524,7 @@ type triageRow struct {
 	FallbackCount         int        `sql:"fallback_count"`
 	LatestScore           *int       `sql:"latest_score"`
 	ScoringStatus         *string    `sql:"scoring_status"`
+	FeedbackEdited        int        `sql:"feedback_edited"`
 }
 
 // queryTriageGroup counts and fetches a paginated slice of sessions matching
@@ -581,6 +623,11 @@ func (s *SessionService) queryTriageGroup(ctx context.Context, page, pageSize in
 				fmt.Sprintf("(SELECT status FROM session_scores WHERE session_id = %s ORDER BY started_at DESC LIMIT 1)", sid),
 				"scoring_status",
 			)
+
+			sel.AppendSelectAs(
+				fmt.Sprintf("(CASE WHEN EXISTS(SELECT 1 FROM session_review_activities WHERE session_id = %s AND action = 'update_feedback') THEN 1 ELSE 0 END)", sid),
+				"feedback_edited",
+			)
 		}).
 		Scan(ctx, &rows)
 	if err != nil {
@@ -611,6 +658,7 @@ func (s *SessionService) queryTriageGroup(ctx context.Context, page, pageSize in
 			QualityRating:         row.QualityRating,
 			ActionTaken:           row.ActionTaken,
 			InvestigationFeedback: row.InvestigationFeedback,
+			FeedbackEdited:        row.FeedbackEdited != 0,
 			HasParallelStages:     row.HasParallel != 0,
 			HasSubAgents:          row.HasSubAgents != 0,
 			HasActionStages:       row.HasActionStages != 0,

@@ -44,7 +44,8 @@ import { useChatState } from '../hooks/useChatState.ts';
 
 import { getSession, getTimeline, updateReview, handleAPIError } from '../services/api.ts';
 import { websocketService } from '../services/websocket.ts';
-import { REVIEW_ACTION } from '../types/api.ts';
+import { REVIEW_ACTION, REVIEW_MODAL_MODE, getReviewModalMode } from '../types/api.ts';
+import type { ReviewModalMode } from '../types/api.ts';
 
 import { parseTimelineToFlow } from '../utils/timelineParser.ts';
 import type { FlowItem } from '../utils/timelineParser.ts';
@@ -253,7 +254,7 @@ export function SessionDetailPage() {
   }, [chatState.chatStageId]);
 
   // --- Review state ---
-  const [reviewModalMode, setReviewModalMode] = useState<'complete' | 'edit' | null>(null);
+  const [reviewModalMode, setReviewModalMode] = useState<ReviewModalMode | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
@@ -1365,7 +1366,7 @@ export function SessionDetailPage() {
 
   const handleReviewClick = useCallback(() => {
     if (!session) return;
-    setReviewModalMode(session.quality_rating ? 'edit' : 'complete');
+    setReviewModalMode(getReviewModalMode(session.review_status));
   }, [session]);
 
   const handleReviewComplete = useCallback(async (qualityRating: string, actionTaken?: string, investigationFeedback?: string) => {
@@ -1725,16 +1726,18 @@ export function SessionDetailPage() {
 
             {/* Review modals */}
             <CompleteReviewModal
-              open={reviewModalMode === 'complete'}
+              open={reviewModalMode === REVIEW_MODAL_MODE.COMPLETE}
               onClose={() => { setReviewModalMode(null); setReviewError(null); }}
               onComplete={handleReviewComplete}
               loading={reviewLoading}
               error={reviewError}
               title={session.alert_type ? `Review: ${session.alert_type}` : undefined}
               executiveSummary={session.executive_summary}
+              assignee={session.assignee}
+              feedbackEdited={session.feedback_edited}
             />
             <EditFeedbackModal
-              open={reviewModalMode === 'edit'}
+              open={reviewModalMode === REVIEW_MODAL_MODE.EDIT}
               onClose={() => { setReviewModalMode(null); setReviewError(null); }}
               onSave={handleReviewSave}
               loading={reviewLoading}
@@ -1743,6 +1746,8 @@ export function SessionDetailPage() {
               initialActionTaken={session.action_taken ?? ''}
               initialInvestigationFeedback={session.investigation_feedback ?? ''}
               executiveSummary={session.executive_summary}
+              assignee={session.assignee}
+              feedbackEdited={session.feedback_edited}
             />
 
             {/* Jump to Chat button — after Final Analysis, at the bottom */}

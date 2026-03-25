@@ -69,7 +69,8 @@ import {
 } from '../../constants/eventTypes.ts';
 import type { SessionFilter, PaginationState, SortState, DashboardTab, TriageFilter } from '../../types/dashboard.ts';
 import type { DashboardSessionItem, ActiveSessionItem, QueuedSessionItem } from '../../types/session.ts';
-import { REVIEW_ACTION } from '../../types/api.ts';
+import { REVIEW_ACTION, REVIEW_MODAL_MODE, getReviewModalMode } from '../../types/api.ts';
+import type { ReviewModalMode } from '../../types/api.ts';
 import type { DashboardListParams, TriageGroup, TriageGroupKey, TriageGroupParams, UpdateReviewResponse } from '../../types/api.ts';
 import type { FilterOptionsResponse } from '../../types/system.ts';
 import type { SessionProgressPayload } from '../../types/events.ts';
@@ -737,13 +738,13 @@ export function DashboardView() {
 
   const [reviewTarget, setReviewTarget] = useState<{
     session: DashboardSessionItem;
-    mode: 'complete' | 'edit';
+    mode: ReviewModalMode;
   } | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
   const handleSessionReviewClick = useCallback((session: DashboardSessionItem) => {
-    const mode = session.quality_rating ? 'edit' : 'complete';
+    const mode = getReviewModalMode(session.review_status);
     setReviewTarget({ session, mode });
     setReviewError(null);
   }, []);
@@ -1057,16 +1058,18 @@ export function DashboardView() {
 
           {/* Review modals for session-level review */}
           <CompleteReviewModal
-            open={reviewTarget?.mode === 'complete'}
+            open={reviewTarget?.mode === REVIEW_MODAL_MODE.COMPLETE}
             onClose={() => { setReviewTarget(null); setReviewError(null); }}
             onComplete={handleSessionReviewComplete}
             loading={reviewLoading}
             error={reviewError}
             title={reviewTarget?.session.alert_type ? `Review: ${reviewTarget.session.alert_type}` : undefined}
             executiveSummary={reviewTarget?.session.executive_summary}
+            assignee={reviewTarget?.session.assignee}
+            feedbackEdited={reviewTarget?.session.feedback_edited}
           />
           <EditFeedbackModal
-            open={reviewTarget?.mode === 'edit'}
+            open={reviewTarget?.mode === REVIEW_MODAL_MODE.EDIT}
             onClose={() => { setReviewTarget(null); setReviewError(null); }}
             onSave={handleSessionReviewSave}
             loading={reviewLoading}
@@ -1075,6 +1078,8 @@ export function DashboardView() {
             initialActionTaken={reviewTarget?.session.action_taken ?? ''}
             initialInvestigationFeedback={reviewTarget?.session.investigation_feedback ?? ''}
             executiveSummary={reviewTarget?.session.executive_summary}
+            assignee={reviewTarget?.session.assignee}
+            feedbackEdited={reviewTarget?.session.feedback_edited}
           />
         </>
       )}

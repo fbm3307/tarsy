@@ -276,6 +276,50 @@ func TestSessionService_UpdateReviewStatus(t *testing.T) {
 		assert.Contains(t, errMsg, "conflict")
 	})
 
+	t.Run("complete from NULL review_status", func(t *testing.T) {
+		id := seedReviewSession(t, service, "", "")
+		rating := "accurate"
+		actionTaken := "Escalated"
+
+		sess := doReview(t, service, id, models.UpdateReviewRequest{
+			Action:        "complete",
+			Actor:         "alice@test.com",
+			QualityRating: &rating,
+			ActionTaken:   &actionTaken,
+		})
+		require.NotNil(t, sess.ReviewStatus)
+		assert.Equal(t, alertsession.ReviewStatusReviewed, *sess.ReviewStatus)
+		assert.Equal(t, "alice@test.com", *sess.Assignee)
+		assert.Equal(t, alertsession.QualityRatingAccurate, *sess.QualityRating)
+		assert.Equal(t, "Escalated", *sess.ActionTaken)
+
+		ctx := context.Background()
+		activities, err := service.GetReviewActivity(ctx, id)
+		require.NoError(t, err)
+		require.Len(t, activities, 1, "complete from NULL should produce a single activity")
+		assert.Equal(t, sessionreviewactivity.ActionComplete, activities[0].Action)
+		assert.Nil(t, activities[0].FromStatus, "from_status should be nil for NULL transition")
+	})
+
+	t.Run("claim from NULL review_status", func(t *testing.T) {
+		id := seedReviewSession(t, service, "", "")
+
+		sess := doReview(t, service, id, models.UpdateReviewRequest{
+			Action: "claim",
+			Actor:  "alice@test.com",
+		})
+		require.NotNil(t, sess.ReviewStatus)
+		assert.Equal(t, alertsession.ReviewStatusInProgress, *sess.ReviewStatus)
+		assert.Equal(t, "alice@test.com", *sess.Assignee)
+
+		ctx := context.Background()
+		activities, err := service.GetReviewActivity(ctx, id)
+		require.NoError(t, err)
+		require.Len(t, activities, 1)
+		assert.Equal(t, sessionreviewactivity.ActionClaim, activities[0].Action)
+		assert.Nil(t, activities[0].FromStatus, "from_status should be nil for NULL transition")
+	})
+
 	t.Run("reopen from reviewed", func(t *testing.T) {
 		id := seedReviewSession(t, service, "reviewed", "john@test.com")
 
@@ -702,6 +746,76 @@ func TestSessionService_GetTriageGroup(t *testing.T) {
 		assert.Equal(t, 88, *s.LatestScore)
 		require.NotNil(t, s.ScoringStatus)
 		assert.Equal(t, "completed", *s.ScoringStatus)
+	})
+}
+
+func TestSessionService_FeedbackEdited(t *testing.T) {
+	client := testdb.NewTestClient(t)
+	service := setupTestSessionService(t, client.Client)
+	ctx := context.Background()
+
+	// Create a reviewed session via the normal workflow (claim + complete).
+	id := seedReviewSession(t, service, "needs_review", "")
+	doReview(t, service, id, models.UpdateReviewRequest{Action: "claim", Actor: "alice@test.com"})
+	rating := "accurate"
+	doReview(t, service, id, models.UpdateReviewRequest{
+		Action: "complete", Actor: "alice@test.com", QualityRating: &rating,
+	})
+
+	t.Run("false before any feedback update", func(t *testing.T) {
+		triage, err := service.GetTriageGroup(ctx, models.TriageGroupReviewed,
+			models.TriageGroupParams{Page: 1, PageSize: 20})
+		require.NoError(t, err)
+		require.Len(t, triage.Sessions, 1)
+		assert.False(t, triage.Sessions[0].FeedbackEdited)
+
+		dash, err := service.ListSessionsForDashboard(ctx, models.DashboardListParams{
+			Page: 1, PageSize: 25, SortBy: "created_at", SortOrder: "desc",
+		})
+		require.NoError(t, err)
+		var found bool
+		for _, s := range dash.Sessions {
+			if s.ID == id {
+				found = true
+				assert.False(t, s.FeedbackEdited)
+			}
+		}
+		require.True(t, found)
+
+		detail, err := service.GetSessionDetail(ctx, id)
+		require.NoError(t, err)
+		assert.False(t, detail.FeedbackEdited)
+	})
+
+	// Perform an update_feedback action.
+	newRating := "partially_accurate"
+	doReview(t, service, id, models.UpdateReviewRequest{
+		Action: "update_feedback", Actor: "alice@test.com", QualityRating: &newRating,
+	})
+
+	t.Run("true after feedback update", func(t *testing.T) {
+		triage, err := service.GetTriageGroup(ctx, models.TriageGroupReviewed,
+			models.TriageGroupParams{Page: 1, PageSize: 20})
+		require.NoError(t, err)
+		require.Len(t, triage.Sessions, 1)
+		assert.True(t, triage.Sessions[0].FeedbackEdited)
+
+		dash, err := service.ListSessionsForDashboard(ctx, models.DashboardListParams{
+			Page: 1, PageSize: 25, SortBy: "created_at", SortOrder: "desc",
+		})
+		require.NoError(t, err)
+		var found bool
+		for _, s := range dash.Sessions {
+			if s.ID == id {
+				found = true
+				assert.True(t, s.FeedbackEdited)
+			}
+		}
+		require.True(t, found)
+
+		detail, err := service.GetSessionDetail(ctx, id)
+		require.NoError(t, err)
+		assert.True(t, detail.FeedbackEdited)
 	})
 }
 
