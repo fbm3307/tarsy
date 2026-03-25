@@ -5,12 +5,16 @@ import (
 	stdsql "database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/codeready-toolchain/tarsy/test/util"
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +38,8 @@ func TestMigrations_ApplyAll(t *testing.T) {
 		"timeline_events",
 		"stages",
 		"llm_interactions",
+		"investigation_memories",
+		"alert_session_injected_memories",
 	} {
 		assert.Contains(t, tables, expected, "table %q should exist after migrations", expected)
 	}
@@ -87,11 +93,18 @@ func TestMigrations_EntParity(t *testing.T) {
 	sort.Strings(entTables)
 	assert.Equal(t, entTables, migTables, "migration and Ent should produce the same tables")
 
-	// Compare columns for each shared table
+	// Compare columns for each shared table.
+	// The investigation_memories.embedding column is raw SQL (pgvector type),
+	// not managed by Ent, so we exclude it from the parity comparison.
 	sharedTables := intersect(migTables, entTables)
 	for _, table := range sharedTables {
 		migCols := queryColumnTypes(t, dbMig, "public", table)
 		entCols := queryColumnTypes(t, dbEnt, schemaEnt, table)
+
+		if table == "investigation_memories" {
+			migCols = filterColumns(migCols, "embedding")
+		}
+
 		assert.Equal(t, entCols, migCols,
 			"column mismatch in table %q between migration and Ent schemas", table)
 	}
@@ -253,6 +266,20 @@ func queryColumnTypes(t *testing.T, db *stdsql.DB, schema, table string) []colum
 	return cols
 }
 
+func filterColumns(cols []columnInfo, exclude ...string) []columnInfo {
+	excludeSet := make(map[string]bool, len(exclude))
+	for _, name := range exclude {
+		excludeSet[name] = true
+	}
+	var result []columnInfo
+	for _, c := range cols {
+		if !excludeSet[c.Name] {
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
 func intersect(a, b []string) []string {
 	set := make(map[string]bool, len(b))
 	for _, s := range b {
@@ -266,4 +293,90 @@ func intersect(a, b []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// TestMigrations_DirtyRecovery verifies that runMigrations auto-recovers when
+// the database is left in a dirty state by a previous failed deploy. It applies
+// all-but-last migration, simulates a dirty marker for the last one, then
+// confirms runMigrations recovers and applies it cleanly.
+func TestMigrations_DirtyRecovery(t *testing.T) {
+	ctx := context.Background()
+	db, dbName := setupMigrationTestDB(t)
+
+	total := countUpMigrations(t)
+	require.Greater(t, total, 1, "need at least 2 migrations to test recovery")
+
+	// Apply all but the last migration via a manual migrate instance.
+	pgDriver, err := postgres.WithInstance(db, &postgres.Config{})
+	require.NoError(t, err)
+	srcDriver, err := iofs.New(migrationsFS, "migrations")
+	require.NoError(t, err)
+	m, err := migrate.NewWithInstance("iofs", srcDriver, dbName, pgDriver)
+	require.NoError(t, err)
+
+	err = m.Steps(total - 1)
+	require.NoError(t, err)
+
+	prevVersion, dirty, err := m.Version()
+	require.NoError(t, err)
+	require.False(t, dirty)
+
+	latestVersion := latestMigrationVersion(t)
+	require.Greater(t, latestVersion, prevVersion)
+
+	// Simulate a dirty state: a previous deploy attempted the latest migration
+	// but its transactional DDL rolled back. schema_migrations is left at the
+	// latest version with dirty=true, while the actual schema is at prevVersion.
+	_, err = db.ExecContext(ctx,
+		"UPDATE schema_migrations SET version = $1, dirty = true", latestVersion)
+	require.NoError(t, err)
+
+	_ = srcDriver.Close()
+
+	// Run the full migration flow — auto-recovery should detect dirty,
+	// roll back to prevVersion, and re-apply the latest migration cleanly.
+	drv := entsql.OpenDB(dialect.Postgres, db)
+	err = runMigrations(ctx, db, Config{Database: dbName}, drv)
+	require.NoError(t, err)
+
+	var recoveredVersion uint
+	var recoveredDirty bool
+	err = db.QueryRowContext(ctx,
+		"SELECT version, dirty FROM schema_migrations").Scan(&recoveredVersion, &recoveredDirty)
+	require.NoError(t, err)
+	assert.Equal(t, latestVersion, recoveredVersion)
+	assert.False(t, recoveredDirty)
+}
+
+func countUpMigrations(t *testing.T) int {
+	t.Helper()
+	entries, err := migrationsFS.ReadDir("migrations")
+	require.NoError(t, err)
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".up.sql") {
+			count++
+		}
+	}
+	return count
+}
+
+func latestMigrationVersion(t *testing.T) uint {
+	t.Helper()
+	entries, err := migrationsFS.ReadDir("migrations")
+	require.NoError(t, err)
+	var latest uint64
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".up.sql") {
+			continue
+		}
+		parts := strings.SplitN(entry.Name(), "_", 2)
+		v, err := strconv.ParseUint(parts[0], 10, 64)
+		require.NoError(t, err)
+		if v > latest {
+			latest = v
+		}
+	}
+	require.Greater(t, latest, uint64(0))
+	return uint(latest)
 }

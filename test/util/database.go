@@ -111,7 +111,7 @@ func getOrCreateSharedDatabase(t *testing.T) string {
 		t.Log("Starting shared PostgreSQL testcontainer for all tests")
 
 		pgContainer, err := postgres.Run(ctx,
-			"postgres:17-alpine",
+			"pgvector/pgvector:pg17",
 			postgres.WithDatabase("test"),
 			postgres.WithUsername("test"),
 			postgres.WithPassword("test"),
@@ -131,6 +131,23 @@ func getOrCreateSharedDatabase(t *testing.T) string {
 			containerErr = fmt.Errorf("failed to get connection string: %w", err)
 			return
 		}
+
+		// Create extensions upfront, matching CI's "Initialize PostgreSQL extensions" step.
+		// Without this, a test that forgets CREATE EXTENSION would pass in CI
+		// (pre-created) but fail locally.
+		db, err := stdsql.Open("pgx", connStr)
+		if err != nil {
+			containerErr = fmt.Errorf("failed to connect for extension setup: %w", err)
+			return
+		}
+		for _, ext := range []string{"vector", "uuid-ossp", "pg_trgm"} {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf(`CREATE EXTENSION IF NOT EXISTS "%s"`, ext)); err != nil {
+				_ = db.Close()
+				containerErr = fmt.Errorf("failed to create extension %s: %w", ext, err)
+				return
+			}
+		}
+		_ = db.Close()
 
 		sharedConnStr = connStr
 		t.Logf("Shared container ready: %s", sharedConnStr)
@@ -171,11 +188,12 @@ func GenerateSchemaName(t *testing.T) string {
 
 // AddSearchPathToConnString appends search_path parameter to a PostgreSQL connection string.
 // This ensures all connections in the pool use the specified schema.
+// Includes "public" so that extension types (e.g. pgvector's "vector") installed
+// in the public schema remain visible.
 func AddSearchPathToConnString(connStr, schemaName string) string {
-	// Add search_path as a connection parameter
 	separator := "?"
 	if strings.Contains(connStr, "?") {
 		separator = "&"
 	}
-	return fmt.Sprintf("%s%ssearch_path=%s", connStr, separator, schemaName)
+	return fmt.Sprintf("%s%ssearch_path=%s,public", connStr, separator, schemaName)
 }

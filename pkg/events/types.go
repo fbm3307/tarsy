@@ -77,6 +77,7 @@ type ScoringStatus string
 // Possible ScoringStatus values for session.score_updated payloads.
 const (
 	ScoringStatusInProgress ScoringStatus = "in_progress" // LLM evaluation is running
+	ScoringStatusMemorizing ScoringStatus = "memorizing"  // memory extraction after scoring
 	ScoringStatusCompleted  ScoringStatus = "completed"   // scoring finished successfully
 	ScoringStatusFailed     ScoringStatus = "failed"      // scoring encountered an error
 )
@@ -125,6 +126,7 @@ const (
 // ProgressPhase values for execution-level progress events.
 const (
 	ProgressPhaseInvestigating = "investigating"
+	ProgressPhaseRemediating   = "remediating"
 	ProgressPhaseGatheringInfo = "gathering_info"
 	ProgressPhaseDistilling    = "distilling"
 	ProgressPhaseConcluding    = "concluding"

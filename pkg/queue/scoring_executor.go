@@ -25,6 +25,7 @@ import (
 	"github.com/codeready-toolchain/tarsy/pkg/agent/prompt"
 	"github.com/codeready-toolchain/tarsy/pkg/config"
 	"github.com/codeready-toolchain/tarsy/pkg/events"
+	"github.com/codeready-toolchain/tarsy/pkg/memory"
 	"github.com/codeready-toolchain/tarsy/pkg/models"
 	"github.com/codeready-toolchain/tarsy/pkg/runbook"
 	"github.com/codeready-toolchain/tarsy/pkg/services"
@@ -51,6 +52,9 @@ type ScoringExecutor struct {
 	messageService     *services.MessageService
 	runbookService     *runbook.Service
 
+	memoryService *memory.Service
+	memoryConfig  *config.MemoryConfig
+
 	mu            sync.RWMutex
 	wg            sync.WaitGroup
 	stopped       bool
@@ -60,15 +64,23 @@ type ScoringExecutor struct {
 
 // NewScoringExecutor creates a new ScoringExecutor.
 // runbookService may be nil (runbook content will be omitted from the scoring context).
+// memoryService may be nil (memory extraction will be skipped).
 func NewScoringExecutor(
 	cfg *config.Config,
 	dbClient *ent.Client,
 	llmClient agent.LLMClient,
 	eventPublisher agent.EventPublisher,
 	runbookService *runbook.Service,
+	memoryService *memory.Service,
 ) *ScoringExecutor {
 	controllerFactory := controller.NewFactory()
 	msgService := services.NewMessageService(dbClient)
+
+	var memCfg *config.MemoryConfig
+	if memoryService != nil {
+		memCfg = config.ResolvedMemoryConfig(cfg.Defaults)
+	}
+
 	return &ScoringExecutor{
 		cfg:                cfg,
 		dbClient:           dbClient,
@@ -81,6 +93,8 @@ func NewScoringExecutor(
 		interactionService: services.NewInteractionService(dbClient, msgService),
 		messageService:     msgService,
 		runbookService:     runbookService,
+		memoryService:      memoryService,
+		memoryConfig:       memCfg,
 		activeCancels:      make(map[string]context.CancelFunc),
 	}
 }
@@ -388,6 +402,12 @@ func (e *ScoringExecutor) executeScoring(ctx context.Context, scoreID, stageID, 
 		e.failScore(scoreID, errMsg)
 	}
 
+	// Run memory extraction while the scoring execution is still active so
+	// reflector timeline events stream to the dashboard in real-time.
+	if scoreCompleted && e.memoryService != nil && e.memoryConfig != nil {
+		e.runMemoryExtraction(ctx, session, investigationContext, result, agentExecCtx)
+	}
+
 	// Update AgentExecution terminal status
 	entStatus := mapAgentStatusToEntStatus(agentStatus)
 	if updateErr := e.stageService.UpdateAgentExecutionStatus(context.Background(), exec.ID, entStatus, errMsg); updateErr != nil {
@@ -418,6 +438,84 @@ func (e *ScoringExecutor) executeScoring(ctx context.Context, scoreID, stageID, 
 
 	// Schedule event cleanup
 	e.scheduleEventCleanup(stageID, time.Now())
+}
+
+// runMemoryExtraction runs the Reflector to extract memories from a completed investigation.
+// All errors are warn-logged — extraction never blocks scoring.
+func (e *ScoringExecutor) runMemoryExtraction(
+	ctx context.Context,
+	session *ent.AlertSession,
+	investigationContext string,
+	scoringResult *agent.ExecutionResult,
+	agentExecCtx *agent.ExecutionContext,
+) {
+	logger := slog.With("session_id", session.ID)
+
+	if session.FinalAnalysis == nil {
+		logger.Info("No final analysis — skipping memory extraction")
+		return
+	}
+
+	e.publishScoreUpdated(session.ID, events.ScoringStatusMemorizing)
+
+	var parsedScore controller.ScoringResult
+	if err := json.Unmarshal([]byte(scoringResult.FinalAnalysis), &parsedScore); err != nil {
+		logger.Warn("Failed to parse scoring result for reflector", "error", err)
+		return
+	}
+
+	project := "default"
+
+	existingMemories, err := e.memoryService.FindSimilar(
+		ctx, project, *session.FinalAnalysis, e.memoryConfig.ReflectorMemoryLimit,
+	)
+	if err != nil {
+		logger.Warn("Failed to fetch existing memories for reflector", "error", err)
+		existingMemories = nil
+	}
+
+	reflectorCtrl := memory.NewReflectorController(memory.ReflectorInput{
+		InvestigationContext: investigationContext,
+		ScoringResult:        parsedScore,
+		ExistingMemories:     existingMemories,
+		AlertType:            session.AlertType,
+		ChainID:              session.ChainID,
+	})
+
+	reflectorResult, err := reflectorCtrl.Run(ctx, agentExecCtx, "")
+	if err != nil {
+		logger.Warn("Reflector failed", "error", err)
+		return
+	}
+
+	parsed, ok := memory.ParseReflectorResponse(reflectorResult.FinalAnalysis)
+	if !ok {
+		logger.Warn("Reflector output could not be parsed — no memories extracted",
+			"response_length", len(reflectorResult.FinalAnalysis))
+		return
+	}
+	if parsed.IsEmpty() {
+		logger.Info("Reflector found no new learnings")
+		return
+	}
+
+	var alertTypePtr *string
+	if session.AlertType != "" {
+		alertTypePtr = &session.AlertType
+	}
+	chainIDPtr := &session.ChainID
+
+	if applyErr := e.memoryService.ApplyReflectorActions(
+		ctx, project, session.ID, alertTypePtr, chainIDPtr, parsedScore.TotalScore, parsed,
+	); applyErr != nil {
+		logger.Warn("Failed to apply reflector actions",
+			"error", applyErr, "project", project, "session_id", session.ID)
+	}
+
+	logger.Info("Memory extraction completed",
+		"created", len(parsed.Create),
+		"reinforced", len(parsed.Reinforce),
+		"deprecated", len(parsed.Deprecate))
 }
 
 // publishScoreUpdated notifies the global sessions channel that scoring
