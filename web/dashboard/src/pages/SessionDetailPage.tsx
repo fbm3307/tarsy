@@ -99,6 +99,7 @@ import {
 const SessionHeader = lazy(() => import('../components/session/SessionHeader.tsx'));
 const OriginalAlertCard = lazy(() => import('../components/session/OriginalAlertCard.tsx'));
 const FinalAnalysisCard = lazy(() => import('../components/session/FinalAnalysisCard.tsx'));
+const ExtractedLearningsCard = lazy(() => import('../components/session/ExtractedLearningsCard.tsx'));
 const ConversationTimeline = lazy(() => import('../components/session/ConversationTimeline.tsx'));
 const ChatPanel = lazy(() => import('../components/chat/ChatPanel.tsx'));
 
@@ -1721,6 +1722,14 @@ export function SessionDetailPage() {
                 scoringStatus={session.scoring_status}
                 qualityRating={session.quality_rating}
                 onReviewClick={handleReviewClick}
+              />
+            </Suspense>
+
+            {/* Lessons learned (memories) from this investigation */}
+            <Suspense fallback={null}>
+              <ExtractedLearningsCard
+                sessionId={session.id}
+                hasScore={session.latest_score != null}
               />
             </Suspense>
 
