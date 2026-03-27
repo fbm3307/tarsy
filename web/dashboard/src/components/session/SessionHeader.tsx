@@ -12,30 +12,33 @@ import {
   DialogActions,
   CircularProgress,
   Tooltip,
+  IconButton,
+  Collapse,
   alpha,
 } from '@mui/material';
 import {
-  CancelOutlined,
+  Stop,
   Replay as ReplayIcon,
-  CallSplit,
   GradingOutlined,
+  ExpandMore,
+  SubjectRounded,
 } from '@mui/icons-material';
+import CopyButton from '../shared/CopyButton';
+import { AlertDataContent } from './OriginalAlertCard';
 import { StatusBadge } from '../common/StatusBadge';
-import { ScoreBadge } from '../common/ScoreBadge';
 import ProgressIndicator from '../common/ProgressIndicator';
-import TokenUsageDisplay from '../shared/TokenUsageDisplay';
-import { formatTimestamp } from '../../utils/format';
+import { formatTimestamp, formatTokensCompact } from '../../utils/format';
 import { cancelSession, triggerScoring, handleAPIError } from '../../services/api';
 import {
   SESSION_STATUS,
-  EXECUTION_STATUS,
+  SCORING_STATUS,
   isTerminalStatus,
   canCancelSession,
   type SessionStatus,
   ACTIVE_STATUSES,
 } from '../../constants/sessionStatus';
 import type { SessionDetailResponse } from '../../types/session';
-import { ROUTES, sessionScoringPath } from '../../constants/routes';
+import { ROUTES } from '../../constants/routes';
 
 // --- Breathing glow for active sessions ---
 const breathingGlowSx = {
@@ -56,26 +59,32 @@ const breathingGlowSx = {
   animation: 'breathingGlow 2.8s ease-in-out infinite',
 };
 
-// --- Pulse animation for "Live Processing" dot ---
-const liveDotPulseSx = {
-  '@keyframes liveDotPulse': {
-    '0%, 100%': { opacity: 0.4 },
-    '50%': { opacity: 1 },
-  },
-  animation: 'liveDotPulse 2s ease-in-out infinite',
-};
+/**
+ * Extract a short display name from an author string.
+ * K8s service accounts like "system:serviceaccount:ns:name" → "name".
+ * Everything else is returned as-is.
+ */
+function extractDisplayName(author: string): string {
+  if (author.includes(':')) {
+    return author.split(':').pop()!;
+  }
+  return author;
+}
 
 interface SessionHeaderProps {
   session: SessionDetailResponse;
+  /** Raw alert_data string — rendered as a collapsible section inside the header card */
+  alertData?: string;
 }
 
 /**
- * SessionHeader - displays session metadata, status, token usage, MCP summary,
- * stage progress, view segmented control, and cancel/resubmit actions.
+ * SessionHeader - compact banner with session identity, status, timing,
+ * token usage, and cancel/resubmit/scoring actions.
  * Breathing glow applied for active sessions.
  */
 export default function SessionHeader({
   session,
+  alertData,
 }: SessionHeaderProps) {
   const navigate = useNavigate();
   const isActive =
@@ -83,6 +92,9 @@ export default function SessionHeader({
     session.status === SESSION_STATUS.PENDING;
   const canCancel = canCancelSession(session.status as SessionStatus);
   const isTerminal = isTerminalStatus(session.status as SessionStatus);
+
+  const [alertExpanded, setAlertExpanded] = useState(false);
+
 
   // Cancel dialog
   const [showCancelDialog, setShowCancelDialog] = useState(false);
@@ -150,585 +162,273 @@ export default function SessionHeader({
     }
   }, [session.id]);
 
-  const handleScoreClick = useCallback(() => {
-    if (session.score_id || session.latest_score != null) {
-      navigate(sessionScoringPath(session.id));
-    }
-  }, [navigate, session.id, session.score_id, session.latest_score]);
-
-  // MCP summary
-  const mcpServers = session.mcp_selection
-    ? Object.keys(session.mcp_selection).length
-    : 0;
-
-  // Total interactions
-  const totalInteractions =
-    (session.llm_interaction_count ?? 0) + (session.mcp_interaction_count ?? 0);
+  useEffect(() => {
+    if (!scoringTriggered) return;
+    const done = session.latest_score != null
+      || session.scoring_status === SCORING_STATUS.COMPLETED
+      || session.scoring_status === SCORING_STATUS.FAILED;
+    if (done) setScoringTriggered(false);
+  }, [scoringTriggered, session.latest_score, session.scoring_status]);
 
   return (
     <Paper
       elevation={2}
       sx={{
-        p: 3,
+        px: 3,
+        py: 2,
         mb: 2,
         borderRadius: 2,
         ...(isActive ? breathingGlowSx : {}),
       }}
     >
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {/* Top row: title + status + actions */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        {/* Row 1: Title + Status + Duration + Actions */}
         <Box
           sx={{
             display: 'flex',
+            alignItems: 'center',
             justifyContent: 'space-between',
-            alignItems: 'flex-start',
             gap: 2,
             flexWrap: 'wrap',
           }}
         >
-          {/* Left: Alert details */}
-          <Box sx={{ flex: 1, minWidth: 0 }}>
+          {/* Left: title + status + duration */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
+            <Typography
+              variant="h5"
+              sx={{ fontWeight: 600, wordBreak: 'break-word' }}
+            >
+              {session.alert_type || 'Alert Processing'}
+            </Typography>
+            <StatusBadge status={session.status} />
+            <Typography variant="body2" color="text.disabled">·</Typography>
+            <ProgressIndicator
+              status={session.status}
+              startedAt={session.started_at}
+              durationMs={session.duration_ms}
+              variant="inline"
+            />
+          </Box>
+
+          {/* Right: action buttons */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            {canCancel && (
+              <Tooltip title={isCanceling || session.status === SESSION_STATUS.CANCELLING ? 'Canceling…' : 'Cancel session'}>
+                <span>
+                  <IconButton
+                    onClick={handleCancelClick}
+                    disabled={isCanceling || session.status === SESSION_STATUS.CANCELLING}
+                    sx={{
+                      color: 'error.main',
+                      border: '1px solid',
+                      borderColor: 'error.main',
+                      backgroundColor: 'transparent',
+                      transition: 'all 0.2s',
+                      '&:hover': {
+                        backgroundColor: 'error.main',
+                        borderColor: 'error.main',
+                        color: 'error.contrastText',
+                        transform: 'scale(1.05)',
+                      },
+                      '&:disabled': {
+                        borderColor: 'action.disabled',
+                        color: 'action.disabled',
+                        opacity: 0.5,
+                      },
+                    }}
+                  >
+                    {isCanceling || session.status === SESSION_STATUS.CANCELLING
+                      ? <CircularProgress size={22} color="inherit" />
+                      : <Stop />}
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+
+            {isTerminal && (
+              <Tooltip title="Re-submit alert">
+                <IconButton
+                  onClick={handleResubmit}
+                  sx={{
+                    color: 'info.main',
+                    border: '1px solid',
+                    borderColor: 'info.main',
+                    backgroundColor: 'transparent',
+                    transition: 'all 0.2s',
+                    '&:hover': {
+                      backgroundColor: 'info.main',
+                      borderColor: 'info.main',
+                      color: 'info.contrastText',
+                      transform: 'scale(1.05)',
+                    },
+                  }}
+                >
+                  <ReplayIcon />
+                </IconButton>
+              </Tooltip>
+            )}
+
+            {session.status === SESSION_STATUS.COMPLETED && session.latest_score == null &&
+              (!session.scoring_status || session.scoring_status === 'not_scored') && !scoringTriggered && (
+              <Tooltip title={scoringError || 'Score session'}>
+                <IconButton
+                  size="small"
+                  onClick={handleTriggerScoring}
+                  sx={{ color: scoringError ? 'error.main' : 'text.secondary', '&:hover': { bgcolor: 'action.hover' } }}
+                >
+                  <GradingOutlined sx={{ fontSize: '1.2rem' }} />
+                </IconButton>
+              </Tooltip>
+            )}
+            {scoringTriggered && (
+              <Tooltip title="Scoring in progress…">
+                <span>
+                  <IconButton size="small" disabled>
+                    <CircularProgress size={18} color="inherit" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+          </Box>
+        </Box>
+
+        {/* Row 2: Metadata line */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
+          <Typography variant="body2" color="text.secondary">
+            {formatTimestamp(session.started_at, 'absolute')}
+          </Typography>
+          {session.author && (
+            <>
+              <Typography variant="body2" color="text.secondary">·</Typography>
+              <Tooltip title={session.author}>
+                <Typography variant="body2" color="text.secondary">
+                  by <strong>{extractDisplayName(session.author)}</strong>
+                </Typography>
+              </Tooltip>
+            </>
+          )}
+          {session.runbook_url && (() => {
+            let isSafeUrl = false;
+            try {
+              const parsed = new URL(session.runbook_url);
+              isSafeUrl = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+            } catch { /* invalid URL */ }
+            const displayText = session.runbook_url.length > 80
+              ? `${session.runbook_url.substring(0, 77)}...`
+              : session.runbook_url;
+            return (
+              <>
+                <Typography variant="body2" color="text.secondary">·</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Runbook:{' '}
+                  {isSafeUrl ? (
+                    <a
+                      href={session.runbook_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'inherit', textDecoration: 'underline', fontFamily: 'monospace', fontSize: '0.85em' }}
+                    >
+                      {displayText}
+                    </a>
+                  ) : (
+                    <span style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>{displayText}</span>
+                  )}
+                </Typography>
+              </>
+            );
+          })()}
+        </Box>
+
+        {/* Footer bar: token usage (left) + alert data toggle (right) */}
+        {(session.total_tokens > 0 || alertData) && (
+          <>
             <Box
               sx={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: 2,
-                mb: 0.5,
-                flexWrap: 'wrap',
+                justifyContent: 'space-between',
+                pt: 1.5,
+                borderTop: '1px solid',
+                borderColor: 'divider',
               }}
             >
-              <Typography
-                variant="h5"
-                sx={{ fontWeight: 600, wordBreak: 'break-word' }}
-              >
-                {session.alert_type || 'Alert Processing'}
-                {session.chain_id && (
-                  <Typography component="span" sx={{ color: 'text.secondary', fontWeight: 400 }}>
-                    {' - '}{session.chain_id}
+              {/* Left: tokens */}
+              {session.total_tokens > 0 ? (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Used tokens
                   </Typography>
-                )}
-              </Typography>
-              <Box sx={{ transform: 'scale(1.1)' }}>
-                <StatusBadge status={session.status} />
-              </Box>
-              {session.has_parallel_stages && (
-                <Tooltip
-                  title={`Contains ${session.total_stages} stages with parallel agent execution`}
-                >
-                  <Box
-                    sx={(theme) => ({
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 0.5,
-                      px: 1.5,
-                      py: 0.5,
-                      backgroundColor: alpha(
-                        theme.palette.secondary.main,
-                        0.08,
-                      ),
-                      borderRadius: '16px',
-                      border: '1px solid',
-                      borderColor: alpha(
-                        theme.palette.secondary.main,
-                        0.3,
-                      ),
-                      cursor: 'pointer',
-                      transform: 'scale(1.05)',
-                      transition: 'all 0.2s ease-in-out',
-                      '&:hover': {
-                        backgroundColor: alpha(
-                          theme.palette.secondary.main,
-                          0.15,
-                        ),
-                        borderColor: theme.palette.secondary.main,
-                      },
-                    })}
-                  >
-                    <CallSplit
-                      sx={{ fontSize: '1.1rem', color: 'secondary.main' }}
-                    />
-                    <Typography
-                      variant="body2"
-                      sx={{
-                        fontWeight: 600,
-                        color: 'secondary.main',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      Parallel Agents
+                  <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: 'warning.main' }}>
+                      {formatTokensCompact(session.total_tokens)}
                     </Typography>
+                    <Typography variant="caption" color="text.disabled">total</Typography>
                   </Box>
-                </Tooltip>
-              )}
-            </Box>
+                  {session.input_tokens != null && (
+                    <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600, color: 'info.main' }}>
+                        {formatTokensCompact(session.input_tokens)}
+                      </Typography>
+                      <Typography variant="caption" color="text.disabled">in</Typography>
+                    </Box>
+                  )}
+                  {session.output_tokens != null && (
+                    <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600, color: 'success.main' }}>
+                        {formatTokensCompact(session.output_tokens)}
+                      </Typography>
+                      <Typography variant="caption" color="text.disabled">out</Typography>
+                    </Box>
+                  )}
+                </Box>
+              ) : <Box />}
 
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              Started at {formatTimestamp(session.started_at, 'absolute')}
-            </Typography>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{
-                fontFamily: 'monospace',
-                fontSize: '0.75rem',
-                opacity: 0.7,
-              }}
-            >
-              {session.id}
-            </Typography>
-            {session.author && (
-              <Typography
-                variant="body2"
-                color="text.secondary"
-                sx={{ mt: 0.5 }}
-              >
-                Submitted by: <strong>{session.author}</strong>
-              </Typography>
-            )}
-            {session.runbook_url && (() => {
-              let isSafeUrl = false;
-              try {
-                const parsed = new URL(session.runbook_url);
-                isSafeUrl = parsed.protocol === 'http:' || parsed.protocol === 'https:';
-              } catch { /* invalid URL */ }
-              const displayText = session.runbook_url.length > 200
-                ? `${session.runbook_url.substring(0, 197)}...`
-                : session.runbook_url;
-              return (
+              {/* Divider between tokens and alert data */}
+              {session.total_tokens > 0 && alertData && (
+                <Box sx={{ width: '1px', height: 16, bgcolor: 'divider', mx: 1 }} />
+              )}
+
+              {/* Right: alert data toggle */}
+              {alertData && (
                 <Box
                   sx={{
                     display: 'flex',
                     alignItems: 'center',
                     gap: 0.5,
-                    mt: 0.5,
+                    cursor: 'pointer',
+                    ml: 2,
                   }}
+                  onClick={() => setAlertExpanded(!alertExpanded)}
                 >
-                  <Typography variant="body2" color="text.secondary">
-                    Runbook:{' '}
-                    {isSafeUrl ? (
-                      <a
-                        href={session.runbook_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          color: 'inherit',
-                          textDecoration: 'underline',
-                          fontFamily: 'monospace',
-                          fontSize: '0.85em',
-                        }}
-                      >
-                        {displayText}
-                      </a>
-                    ) : (
-                      <span style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>
-                        {displayText}
-                      </span>
-                    )}
+                  <SubjectRounded sx={{ fontSize: '1rem', color: 'text.secondary' }} />
+                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Alert data
                   </Typography>
+                  <ExpandMore
+                    sx={{
+                      fontSize: '1rem',
+                      color: 'text.disabled',
+                      transition: 'transform 0.3s',
+                      transform: alertExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                    }}
+                  />
+                  <Box onClick={(e) => e.stopPropagation()}>
+                    <CopyButton text={alertData} variant="icon" size="small" tooltip="Copy raw alert data" />
+                  </Box>
                 </Box>
-              );
-            })()}
-          </Box>
-
-          {/* Right: Duration + Actions */}
-          <Box
-            sx={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'flex-end',
-              gap: 1.5,
-              minWidth: 200,
-            }}
-          >
-            <ProgressIndicator
-              status={session.status}
-              startedAt={session.started_at}
-              durationMs={session.duration_ms}
-            />
-
-            <Box
-              sx={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 1,
-                width: '100%',
-                mt: 1,
-              }}
-            >
-              {canCancel && (
-                <Tooltip title="Cancels entire session including all agents">
-                  <Button
-                    variant="outlined"
-                    size="medium"
-                    onClick={handleCancelClick}
-                    disabled={
-                      isCanceling ||
-                      session.status === SESSION_STATUS.CANCELLING
-                    }
-                    startIcon={
-                      isCanceling ||
-                      session.status === SESSION_STATUS.CANCELLING ? (
-                        <CircularProgress size={16} color="inherit" />
-                      ) : (
-                        <CancelOutlined />
-                      )
-                    }
-                    fullWidth
-                    sx={{
-                      textTransform: 'uppercase',
-                      fontWeight: 600,
-                      fontSize: '0.875rem',
-                      py: 1,
-                      px: 2,
-                      backgroundColor: 'background.paper',
-                      color: 'error.main',
-                      borderColor: 'error.main',
-                      borderWidth: 1.5,
-                      transition: 'all 0.2s ease-in-out',
-                      '&:hover': {
-                        backgroundColor: 'error.main',
-                        borderColor: 'error.main',
-                        color: 'error.contrastText',
-                        borderWidth: 1.5,
-                      },
-                    }}
-                  >
-                    {isCanceling ||
-                    session.status === SESSION_STATUS.CANCELLING
-                      ? 'Canceling...'
-                      : 'Cancel Session'}
-                  </Button>
-                </Tooltip>
-              )}
-
-              {isTerminal && (
-                <Tooltip title="Submit a new alert with the same data">
-                  <Button
-                    variant="outlined"
-                    size="large"
-                    onClick={handleResubmit}
-                    sx={{
-                      minWidth: 180,
-                      textTransform: 'none',
-                      fontWeight: 600,
-                      fontSize: '0.95rem',
-                      py: 1,
-                      px: 2.5,
-                      backgroundColor: 'background.paper',
-                      color: 'info.main',
-                      borderColor: 'info.main',
-                      borderWidth: 1.5,
-                      transition: 'all 0.2s ease-in-out',
-                      '&:hover': {
-                        backgroundColor: 'info.main',
-                        borderColor: 'info.main',
-                        color: 'info.contrastText',
-                      },
-                    }}
-                  >
-                    <ReplayIcon sx={{ mr: 1, fontSize: '1.2rem' }} />
-                    RE-SUBMIT ALERT
-                  </Button>
-                </Tooltip>
               )}
             </Box>
-          </Box>
-        </Box>
 
-        {/* Session Summary header */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <Typography
-            variant="subtitle2"
-            sx={{
-              fontWeight: 700,
-              fontSize: '0.85rem',
-              color: 'text.secondary',
-              letterSpacing: 0.3,
-            }}
-          >
-            📊 Session Summary
-          </Typography>
-          {isActive && (
-            <Box
-              sx={(theme) => ({
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 0.75,
-                bgcolor: alpha(theme.palette.info.main, 0.05),
-                border: '1px solid',
-                borderColor: alpha(theme.palette.info.main, 0.2),
-                borderRadius: '12px',
-                px: 1.25,
-                py: 0.25,
-              })}
-            >
-              <Box
-                sx={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  bgcolor: 'info.main',
-                  ...liveDotPulseSx,
-                }}
-              />
-              <Typography variant="caption" sx={{ color: 'info.main', fontWeight: 600 }}>
-                Live Processing
-              </Typography>
-            </Box>
-          )}
-        </Box>
-
-        {/* Summary stats row */}
-        <Box
-          sx={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 1,
-            alignItems: 'center',
-          }}
-        >
-          {/* Total interactions badge */}
-          <Box
-            sx={(theme) => ({
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              px: 1,
-              py: 0.5,
-              backgroundColor: alpha(theme.palette.grey[500], 0.08),
-              borderRadius: '16px',
-              border: '1px solid',
-              borderColor: alpha(theme.palette.grey[500], 0.2),
-            })}
-          >
-            <Typography
-              variant="body2"
-              sx={{ fontWeight: 600, color: 'text.primary' }}
-            >
-              {totalInteractions}
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              total
-            </Typography>
-          </Box>
-
-          <Box
-            sx={(theme) => ({
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              px: 1,
-              py: 0.5,
-              backgroundColor: alpha(theme.palette.primary.main, 0.05),
-              borderRadius: '16px',
-              border: '1px solid',
-              borderColor: alpha(theme.palette.primary.main, 0.2),
-            })}
-          >
-            <Typography
-              variant="body2"
-              sx={{ fontWeight: 600, color: 'primary.main' }}
-            >
-              🧠 {session.llm_interaction_count ?? 0}
-            </Typography>
-            <Typography variant="caption" color="primary.main">
-              LLM
-            </Typography>
-          </Box>
-
-          <Tooltip
-            title={
-              mcpServers > 0 ? (
-                <Box>
-                  <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 0.5 }}>
-                    MCP Communications
-                  </Typography>
-                  {session.mcp_selection && Object.entries(session.mcp_selection).map(([serverName, serverData]) => {
-                    const tools = Array.isArray(serverData) ? serverData : (serverData as Record<string, unknown>)?.tools;
-                    const toolCount = Array.isArray(tools) ? tools.length : 0;
-                    return (
-                      <Typography key={serverName} variant="caption" sx={{ display: 'block' }}>
-                        {serverName}: {toolCount} tool{toolCount !== 1 ? 's' : ''}
-                      </Typography>
-                    );
-                  })}
+            {/* Expanded alert data — full width below footer bar */}
+            {alertData && (
+              <Collapse in={alertExpanded} timeout={300} mountOnEnter unmountOnExit>
+                <Box sx={{ mt: 1.5 }}>
+                  <AlertDataContent alertData={alertData} />
                 </Box>
-              ) : (
-                'Using default MCP servers'
-              )
-            }
-          >
-            <Box
-              sx={(theme) => ({
-                display: 'flex',
-                alignItems: 'center',
-                gap: 0.5,
-                px: 1,
-                py: 0.5,
-                backgroundColor: alpha(theme.palette.warning.main, 0.08),
-                borderRadius: '16px',
-                border: '1px solid',
-                borderColor: alpha(theme.palette.warning.main, 0.3),
-                cursor: 'pointer',
-                transition: 'all 0.2s ease-in-out',
-                '&:hover': {
-                  backgroundColor: alpha(theme.palette.warning.main, 0.16),
-                  borderColor: alpha(theme.palette.warning.main, 0.5),
-                },
-              })}
-            >
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 600, color: 'warning.main' }}
-              >
-                🔧 {session.mcp_interaction_count ?? 0}
-              </Typography>
-              <Typography variant="caption" color="warning.main">
-                MCP
-              </Typography>
-            </Box>
-          </Tooltip>
-
-          {session.error_message && (
-            <Box
-              sx={(theme) => ({
-                display: 'flex',
-                alignItems: 'center',
-                gap: 0.5,
-                px: 1,
-                py: 0.5,
-                backgroundColor: alpha(theme.palette.error.main, 0.05),
-                borderRadius: '16px',
-                border: '1px solid',
-                borderColor: alpha(theme.palette.error.main, 0.2),
-              })}
-            >
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 600, color: 'error.main' }}
-              >
-                ⚠️ 1
-              </Typography>
-              <Typography variant="caption" color="error.main">
-                errors
-              </Typography>
-            </Box>
-          )}
-
-          <Box
-            sx={(theme) => ({
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              px: 1,
-              py: 0.5,
-              backgroundColor: alpha(theme.palette.info.main, 0.05),
-              borderRadius: '16px',
-              border: '1px solid',
-              borderColor: alpha(theme.palette.info.main, 0.2),
-            })}
-          >
-            <Typography
-              variant="body2"
-              sx={{ fontWeight: 600, color: 'info.main' }}
-            >
-              🔗 {session.completed_stages}/{session.total_stages}
-            </Typography>
-            <Typography variant="caption" color="info.main">
-              stages
-            </Typography>
-          </Box>
-
-          {/* Score badge or trigger button */}
-          {session.latest_score != null || (session.scoring_status && session.scoring_status !== 'not_scored') ? (
-            <ScoreBadge
-              score={session.latest_score}
-              scoringStatus={session.scoring_status}
-              variant="pill"
-              onClick={handleScoreClick}
-            />
-          ) : isTerminal && !scoringTriggered ? (
-            <Tooltip title={scoringError || 'Run quality scoring on this session'}>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<GradingOutlined sx={{ fontSize: '1rem' }} />}
-                onClick={handleTriggerScoring}
-                sx={{
-                  textTransform: 'none',
-                  fontWeight: 500,
-                  fontSize: '0.8rem',
-                  py: 0.25,
-                  px: 1,
-                  borderRadius: '16px',
-                  color: scoringError ? 'error.main' : 'text.secondary',
-                  borderColor: scoringError ? 'error.main' : 'divider',
-                }}
-              >
-                Score
-              </Button>
-            </Tooltip>
-          ) : scoringTriggered ? (
-            <ScoreBadge scoringStatus={EXECUTION_STATUS.ACTIVE} variant="pill" />
-          ) : null}
-
-          {session.total_tokens > 0 && (
-            <Box
-              sx={(theme) => ({
-                display: 'flex',
-                alignItems: 'center',
-                gap: 0.5,
-                px: 1,
-                py: 0.5,
-                backgroundColor: alpha(
-                  theme.palette.success.main,
-                  0.05,
-                ),
-                borderRadius: '16px',
-                border: '1px solid',
-                borderColor: alpha(
-                  theme.palette.success.main,
-                  0.2,
-                ),
-              })}
-            >
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 600, color: 'success.main' }}
-              >
-                🪙
-              </Typography>
-              <TokenUsageDisplay
-                tokenData={{
-                  input_tokens: session.input_tokens,
-                  output_tokens: session.output_tokens,
-                  total_tokens: session.total_tokens,
-                }}
-                variant="inline"
-                size="small"
-              />
-            </Box>
-          )}
-        </Box>
-
-        {/* Detailed token usage block */}
-        {session.total_tokens > 0 && (
-          <Box sx={{ mt: 0.5 }}>
-            <TokenUsageDisplay
-              tokenData={{
-                input_tokens: session.input_tokens,
-                output_tokens: session.output_tokens,
-                total_tokens: session.total_tokens,
-              }}
-              variant="detailed"
-              size="medium"
-              showBreakdown
-              label="Session Token Usage"
-              color="success"
-            />
-          </Box>
+              </Collapse>
+            )}
+          </>
         )}
-
       </Box>
 
       {/* Cancel Dialog */}

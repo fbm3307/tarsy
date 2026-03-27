@@ -29,14 +29,12 @@ import {
   ToggleButtonGroup,
 } from '@mui/material';
 import {
-  KeyboardDoubleArrowDown,
   Psychology,
   AccountTree,
 } from '@mui/icons-material';
 
 import { SharedHeader } from '../components/layout/SharedHeader.tsx';
 import { VersionFooter } from '../components/layout/VersionFooter.tsx';
-import { SessionSearchBar } from '../components/session/SessionSearchBar.tsx';
 import { FloatingSubmitAlertFab } from '../components/common/FloatingSubmitAlertFab.tsx';
 import InitializingSpinner from '../components/common/InitializingSpinner.tsx';
 import { useAdvancedAutoScroll } from '../hooks/useAdvancedAutoScroll.ts';
@@ -97,7 +95,6 @@ import {
 // ────────────────────────────────────────────────────────────
 
 const SessionHeader = lazy(() => import('../components/session/SessionHeader.tsx'));
-const OriginalAlertCard = lazy(() => import('../components/session/OriginalAlertCard.tsx'));
 const FinalAnalysisCard = lazy(() => import('../components/session/FinalAnalysisCard.tsx'));
 const ExtractedLearningsCard = lazy(() => import('../components/session/ExtractedLearningsCard.tsx'));
 const ConversationTimeline = lazy(() => import('../components/session/ConversationTimeline.tsx'));
@@ -258,6 +255,11 @@ export function SessionDetailPage() {
   const [reviewModalMode, setReviewModalMode] = useState<ReviewModalMode | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewInitialRating, setReviewInitialRating] = useState<string | undefined>(undefined);
+
+  // --- Counters for chat-triggered layout changes ---
+  const [timelineExpandCounter, setTimelineExpandCounter] = useState(0);
+  const [cardsCollapseCounter, setCardsCollapseCounter] = useState(0);
 
   // --- In-session search ---
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
@@ -265,9 +267,13 @@ export function SessionDetailPage() {
 
   // --- Jump navigation ---
   const [expandCounter, setExpandCounter] = useState(0);
-  const [collapseCounter, setCollapseCounter] = useState(0);
-  const [chatExpandCounter, setChatExpandCounter] = useState(0);
   const finalAnalysisRef = useRef<HTMLDivElement>(null);
+  const chatPanelRef = useRef<HTMLDivElement>(null);
+
+  // --- Layout order: was the session already terminal when first loaded?
+  //     If yes, show summary above the timeline (no layout shift for live sessions).
+  const [wasTerminalOnMount, setWasTerminalOnMount] = useState(false);
+  const terminalCheckIdRef = useRef<string | null>(null);
 
   // --- Stale-fetch guard: tracks current route id so in-flight getSession
   //     calls from a previous route don't overwrite state after navigation ---
@@ -275,6 +281,15 @@ export function SessionDetailPage() {
   useEffect(() => {
     currentIdRef.current = id;
   }, [id]);
+
+  // Set wasTerminalOnMount once per session load (guarded by id).
+  // Resets automatically when navigating to a different session.
+  useEffect(() => {
+    if (!session || loading) return;
+    if (terminalCheckIdRef.current === (id ?? null)) return;
+    terminalCheckIdRef.current = id ?? null;
+    setWasTerminalOnMount(isTerminalStatus(session.status as SessionStatus));
+  }, [session, loading, id]);
 
   // --- Dedup tracking ---
   const knownEventIdsRef = useRef<Set<string>>(new Set());
@@ -964,9 +979,6 @@ export function SessionDetailPage() {
               chatState.onStageStarted(payload.stage_id);
             } else if (TERMINAL_EXECUTION_STATUSES.has(payload.status)) {
               chatState.onStageTerminal();
-              // Re-expand FinalAnalysisCard after the chat completes.
-              // It was auto-collapsed when the user opened the chat panel.
-              setExpandCounter((prev) => prev + 1);
             }
           }
 
@@ -980,10 +992,10 @@ export function SessionDetailPage() {
             });
             setExpandCounter((prev) => prev + 1);
             setTimeout(() => {
-              if (finalAnalysisRef.current) {
+              const target = document.querySelector('[data-executive-summary]') ?? finalAnalysisRef.current;
+              if (target) {
                 const yOffset = -20;
-                const y =
-                  finalAnalysisRef.current.getBoundingClientRect().top + window.pageYOffset + yOffset;
+                const y = target.getBoundingClientRect().top + window.pageYOffset + yOffset;
                 window.scrollTo({ top: y, behavior: 'smooth' });
               }
             }, 500);
@@ -1298,10 +1310,10 @@ export function SessionDetailPage() {
   const handleJumpToSummary = useCallback(() => {
     setExpandCounter((prev) => prev + 1);
     setTimeout(() => {
-      if (finalAnalysisRef.current) {
+      const target = document.querySelector('[data-executive-summary]') ?? finalAnalysisRef.current;
+      if (target) {
         const yOffset = -20;
-        const y =
-          finalAnalysisRef.current.getBoundingClientRect().top + window.pageYOffset + yOffset;
+        const y = target.getBoundingClientRect().top + window.pageYOffset + yOffset;
         window.scrollTo({ top: y, behavior: 'smooth' });
       }
     }, 500);
@@ -1350,6 +1362,12 @@ export function SessionDetailPage() {
       });
       // Enable auto-scroll for chat response
       setAutoScrollEnabled(true);
+      // Expand timeline, collapse analysis/learnings cards, scroll to bottom
+      setTimelineExpandCounter((c) => c + 1);
+      setCardsCollapseCounter((c) => c + 1);
+      setTimeout(() => {
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+      }, 150);
     }
   }, [chatState.sendMessage]);
 
@@ -1357,16 +1375,9 @@ export function SessionDetailPage() {
     chatState.cancelExecution();
   }, [chatState.cancelExecution]);
 
-  const handleCollapseAnalysis = useCallback(() => {
-    setCollapseCounter((prev) => prev + 1);
-  }, []);
-
-  const handleJumpToChat = useCallback(() => {
-    setChatExpandCounter((prev) => prev + 1);
-  }, []);
-
-  const handleReviewClick = useCallback(() => {
+  const handleReviewClick = useCallback((initialRating?: string) => {
     if (!session) return;
+    setReviewInitialRating(initialRating);
     setReviewModalMode(getReviewModalMode(session.review_status));
   }, [session]);
 
@@ -1449,19 +1460,12 @@ export function SessionDetailPage() {
   // Render
   // ────────────────────────────────────────────────────────────
 
-  const hasFinalContent = session?.final_analysis || session?.executive_summary;
+  const hasFinalContent = session?.final_analysis || session?.executive_summary || session?.error_message;
 
   return (
     <>
       <Container maxWidth={false} sx={{ py: 2, px: { xs: 1, sm: 2 } }}>
         <SharedHeader title={headerTitle} showBackButton>
-          {/* Session info */}
-          {session && !loading && (
-            <Typography variant="body2" sx={{ mr: 2, opacity: 0.8, color: 'common.white' }}>
-              {session.stages?.length || 0} stages &bull; {(session.llm_interaction_count ?? 0) + (session.mcp_interaction_count ?? 0)} interactions
-            </Typography>
-          )}
-
           {/* Reasoning / Trace view toggle */}
           {session && !loading && (
             <ToggleButtonGroup
@@ -1590,52 +1594,13 @@ export function SessionDetailPage() {
         {/* Session content */}
         {session && !loading && (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }} data-autoscroll-container>
-            {/* Session Header */}
+            {/* Session Header (with embedded alert data) */}
             <Suspense fallback={<HeaderSkeleton />}>
               <SessionHeader
                 session={session}
+                alertData={session.alert_data}
               />
             </Suspense>
-
-            {/* Original Alert Data */}
-            <Suspense fallback={<AlertCardSkeleton />}>
-              <OriginalAlertCard alertData={session.alert_data} />
-            </Suspense>
-
-            {/* Jump to Summary button */}
-            {hasFinalContent && (
-              <Box sx={{ display: 'flex', justifyContent: 'center', my: 1.5 }}>
-                <Button
-                  variant="text"
-                  size="medium"
-                  onClick={handleJumpToSummary}
-                  startIcon={<KeyboardDoubleArrowDown />}
-                  endIcon={<KeyboardDoubleArrowDown />}
-                  sx={{
-                    textTransform: 'none',
-                    fontWeight: 600,
-                    fontSize: '0.95rem',
-                    py: 1,
-                    px: 3,
-                    color: 'primary.main',
-                    '&:hover': { backgroundColor: 'action.hover' },
-                  }}
-                >
-                  {session.executive_summary ? 'Jump to Summary' : 'Jump to Final Analysis'}
-                </Button>
-              </Box>
-            )}
-
-            {/* In-session search bar (terminated sessions only) */}
-            {isTerminal && (
-              <SessionSearchBar
-                matchCount={matchingItemIds.length}
-                currentMatchIndex={currentMatchIndex}
-                onSearchChange={handleSearchChange}
-                onNextMatch={handleNextMatch}
-                onPrevMatch={handlePrevMatch}
-              />
-            )}
 
             {/* Conversation Timeline */}
             {(session.stages && session.stages.length > 0) || streamingEvents.size > 0 ? (
@@ -1652,10 +1617,22 @@ export function SessionDetailPage() {
                   subAgentStreamingEvents={subAgentStreamingEvents}
                   subAgentExecutionStatuses={subAgentExecutionStatuses}
                   subAgentProgressStatuses={subAgentProgressStatuses}
-                  chainId={session.chain_id}
                   chatStageInProgress={chatStageInProgress}
                   chatStageIds={chatStageIds}
                   searchTerm={debouncedSearchTerm}
+                  defaultCollapsed={wasTerminalOnMount && session.status === SESSION_STATUS.COMPLETED}
+                  expandCounter={timelineExpandCounter}
+                  {...(hasFinalContent ? {
+                    onJumpToSummary: handleJumpToSummary,
+                    hasExecutiveSummary: !!session.executive_summary,
+                  } : {})}
+                  {...(isTerminal ? {
+                    searchMatchCount: matchingItemIds.length,
+                    currentSearchMatchIndex: currentMatchIndex,
+                    onSearchChange: handleSearchChange,
+                    onNextSearchMatch: handleNextMatch,
+                    onPrevSearchMatch: handlePrevMatch,
+                  } : {})}
                 />
               </Suspense>
             ) : isActive ? (
@@ -1687,10 +1664,10 @@ export function SessionDetailPage() {
               </Alert>
             )}
 
-            {/* Chat Panel — between timeline and Final Analysis */}
+            {/* Chat Panel — after timeline */}
             {isChatAvailable && (
               <Suspense fallback={null}>
-                <ChatPanel
+                <ChatPanel ref={chatPanelRef}
                   isAvailable={isChatAvailable}
                   chatExists={!!session.chat_id}
                   onSendMessage={handleSendMessage}
@@ -1701,8 +1678,6 @@ export function SessionDetailPage() {
                   canceling={chatState.canceling}
                   error={chatState.error}
                   onClearError={chatState.clearError}
-                  forceExpand={chatExpandCounter}
-                  onCollapseAnalysis={handleCollapseAnalysis}
                 />
               </Suspense>
             )}
@@ -1716,7 +1691,7 @@ export function SessionDetailPage() {
                 sessionStatus={session.status}
                 errorMessage={session.error_message}
                 expandCounter={expandCounter}
-                collapseCounter={collapseCounter}
+                collapseCounter={cardsCollapseCounter}
                 sessionId={session.id}
                 latestScore={session.latest_score}
                 scoringStatus={session.scoring_status}
@@ -1730,6 +1705,7 @@ export function SessionDetailPage() {
               <ExtractedLearningsCard
                 sessionId={session.id}
                 hasScore={session.latest_score != null}
+                collapseCounter={cardsCollapseCounter}
               />
             </Suspense>
 
@@ -1744,6 +1720,7 @@ export function SessionDetailPage() {
               executiveSummary={session.executive_summary}
               assignee={session.assignee}
               feedbackEdited={session.feedback_edited}
+              initialRating={reviewInitialRating}
             />
             <EditFeedbackModal
               open={reviewModalMode === REVIEW_MODAL_MODE.EDIT}
@@ -1759,29 +1736,6 @@ export function SessionDetailPage() {
               feedbackEdited={session.feedback_edited}
             />
 
-            {/* Jump to Chat button — after Final Analysis, at the bottom */}
-            {isChatAvailable && (
-              <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                <Button
-                  variant="text"
-                  size="medium"
-                  onClick={handleJumpToChat}
-                  startIcon={<KeyboardDoubleArrowDown sx={{ transform: 'rotate(180deg)' }} />}
-                  endIcon={<KeyboardDoubleArrowDown sx={{ transform: 'rotate(180deg)' }} />}
-                  sx={{
-                    textTransform: 'none',
-                    fontWeight: 600,
-                    fontSize: '0.95rem',
-                    py: 1,
-                    px: 3,
-                    color: 'primary.main',
-                    '&:hover': { backgroundColor: 'action.hover' },
-                  }}
-                >
-                  Jump to Follow-up Chat
-                </Button>
-              </Box>
-            )}
           </Box>
         )}
         </Box>

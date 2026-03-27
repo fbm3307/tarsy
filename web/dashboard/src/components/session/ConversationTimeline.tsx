@@ -2,24 +2,27 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
   Box,
   Typography,
-  Chip,
   Collapse,
   Card,
   CardContent,
   Button,
+  IconButton,
+  Tooltip,
 } from '@mui/material';
 import { alpha } from '@mui/material/styles';
 import {
   ExpandMore,
   ExpandLess,
+  UnfoldMore,
+  KeyboardDoubleArrowDown,
+  AccountTree,
 } from '@mui/icons-material';
-import type { FlowItem, TimelineStats, StageGroup } from '../../utils/timelineParser';
+import type { FlowItem, StageGroup } from '../../utils/timelineParser';
 import type { StageOverview } from '../../types/session';
 import type { StreamingItem } from '../streaming/StreamingContentRenderer';
 import {
   FLOW_ITEM,
   groupFlowItemsByStage,
-  getTimelineStats,
   isFlowItemCollapsible,
   isFlowItemTerminal,
   flowItemsToPlainText,
@@ -30,6 +33,7 @@ import StageContent from '../timeline/StageContent';
 import StreamingContentRenderer from '../streaming/StreamingContentRenderer';
 import ProcessingIndicator from '../streaming/ProcessingIndicator';
 import CopyButton from '../shared/CopyButton';
+import { SessionSearchBar } from './SessionSearchBar';
 import InitializingSpinner from '../common/InitializingSpinner';
 import { TERMINAL_EXECUTION_STATUSES, SCORING_STATUS_MESSAGE } from '../../constants/sessionStatus';
 
@@ -39,6 +43,8 @@ import { TERMINAL_EXECUTION_STATUSES, SCORING_STATUS_MESSAGE } from '../../const
  * While the session is streaming, synthesis stays expanded so the user
  * can watch the reasoning flow in real time.
  */
+const NOOP = () => {};
+
 function shouldAutoCollapseStage(group: StageGroup, isSessionActive: boolean): boolean {
   const isCollapsible = !!group.stageType && COLLAPSIBLE_STAGE_TYPES.has(group.stageType);
   if (!isCollapsible) return false;
@@ -69,14 +75,26 @@ interface ConversationTimelineProps {
   subAgentExecutionStatuses?: Map<string, { status: string; stageId: string; agentIndex: number }>;
   /** Sub-agent progress statuses (events with parent_execution_id) */
   subAgentProgressStatuses?: Map<string, string>;
-  /** Chain ID for the header display */
-  chainId?: string;
+  /** Search bar props (only rendered when onSearchChange is provided, i.e. terminal sessions) */
+  searchMatchCount?: number;
+  currentSearchMatchIndex?: number;
+  onSearchChange?: (term: string) => void;
+  onNextSearchMatch?: () => void;
+  onPrevSearchMatch?: () => void;
   /** Whether a chat stage is currently in progress (session may be terminal) */
   chatStageInProgress?: boolean;
   /** Set of stage IDs that are chat stages (for suppressing auto-collapse) */
   chatStageIds?: Set<string>;
   /** Search term for in-session search (highlights + auto-expand) */
   searchTerm?: string;
+  /** Jump-to-summary: shows button in header when provided */
+  onJumpToSummary?: () => void;
+  /** Whether the summary is an executive summary (true) or final analysis (false) */
+  hasExecutiveSummary?: boolean;
+  /** Start with the entire timeline collapsed (for terminal sessions opened directly) */
+  defaultCollapsed?: boolean;
+  /** Increment to expand the timeline from outside (e.g. when user sends a chat message) */
+  expandCounter?: number;
 }
 
 /**
@@ -104,11 +122,32 @@ export default function ConversationTimeline({
   subAgentStreamingEvents,
   subAgentExecutionStatuses,
   subAgentProgressStatuses,
-  chainId,
+  searchMatchCount,
+  currentSearchMatchIndex,
+  onSearchChange,
+  onNextSearchMatch,
+  onPrevSearchMatch,
   chatStageInProgress,
   chatStageIds,
   searchTerm,
+  onJumpToSummary,
+  hasExecutiveSummary,
+  defaultCollapsed,
+  expandCounter = 0,
 }: ConversationTimelineProps) {
+  // --- Whole-timeline collapse (for terminal sessions opened directly) ---
+  const [timelineCollapsed, setTimelineCollapsed] = useState(defaultCollapsed ?? false);
+
+  // Sync when defaultCollapsed flips to true after initial data loads
+  useEffect(() => {
+    if (defaultCollapsed) setTimelineCollapsed(true);
+  }, [defaultCollapsed]);
+
+  // Expand from outside (e.g. when user sends a chat message)
+  useEffect(() => {
+    if (expandCounter > 0) setTimelineCollapsed(false);
+  }, [expandCounter]);
+
   // --- Selected agent tracking (for per-agent ProcessingIndicator message) ---
   const [selectedAgentExecutionId, setSelectedAgentExecutionId] = useState<string | null>(null);
   const handleSelectedAgentChange = useCallback((executionId: string | null) => {
@@ -240,9 +279,6 @@ export default function ConversationTimeline({
     return [...groupsFromItems, ...emptyGroups].sort((a, b) => a.stageIndex - b.stageIndex);
   }, [items, stages]);
 
-  // --- Stats ---
-  const stats: TimelineStats = useMemo(() => getTimelineStats(items, stages), [items, stages]);
-
   // --- Copy ---
   const plainText = useMemo(() => flowItemsToPlainText(items), [items]);
 
@@ -359,128 +395,129 @@ export default function ConversationTimeline({
 
   return (
     <Card>
-      {/* Card header with chain ID, expand/collapse, and copy */}
-      <CardContent sx={{ pb: 0, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider' }}>
-        <Box
-          sx={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 1,
-          }}
-        >
-          <Typography variant="h6" color="primary.main">
-            Chain: {chainId || '—'}
-          </Typography>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={expandAllReasoning ? <ExpandLess /> : <ExpandMore />}
-              onClick={() => {
-                setExpandAllReasoning((v) => !v);
-                setManualOverrides(new Set());
-              }}
-            >
-              {expandAllReasoning ? 'Collapse All Reasoning' : 'Expand All Reasoning'}
-            </Button>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={expandAllToolCalls ? <ExpandLess /> : <ExpandMore />}
-              onClick={() => setExpandAllToolCalls((v) => !v)}
-            >
-              {expandAllToolCalls ? 'Collapse All Tools' : 'Expand All Tools'}
-            </Button>
-            <CopyButton
-              text={plainText}
-              variant="button"
-              buttonVariant="outlined"
-              size="small"
-              label="Copy Chat Flow"
-            />
-          </Box>
-        </Box>
-
-        {/* Stats chips bar */}
-        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mt: 1.5, alignItems: 'center' }}>
-          {stats.totalStages > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`${stats.totalStages} stages`}
-              color="primary"
-            />
-          )}
-          {stats.completedStages > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`${stats.completedStages} completed`}
-              color="success"
-            />
-          )}
-          {stats.failedStages > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`${stats.failedStages} failed`}
-              color="error"
-            />
-          )}
-          {stats.toolCallCount > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`${stats.successfulToolCalls ?? stats.toolCallCount}/${stats.toolCallCount} tool calls`}
-              color={stats.successfulToolCalls === stats.toolCallCount ? 'success' : 'warning'}
-            />
-          )}
-          {stats.thoughtCount > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`${stats.thoughtCount} thoughts`}
-            />
-          )}
-          {stats.finalAnswerCount > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`${stats.finalAnswerCount} analyses`}
-              color="success"
-            />
-          )}
-        </Box>
-      </CardContent>
-
-      {/* Blue "AI Reasoning Flow" bar */}
+      {/* Accordion header — matches ChatPanel / FinalAnalysisCard pattern */}
       <Box
+        onClick={() => setTimelineCollapsed((v) => !v)}
         sx={(theme) => ({
-          bgcolor: alpha(theme.palette.primary.main, 0.08),
-          py: 1.5,
-          px: 3,
-          mt: 1,
-          borderTop: `2px solid ${theme.palette.primary.main}`,
-          borderBottom: `1px solid ${alpha(theme.palette.primary.main, 0.25)}`,
+          p: 2.5,
+          display: 'flex',
+          alignItems: 'center',
+          cursor: 'pointer',
+          bgcolor: !timelineCollapsed
+            ? alpha(theme.palette.primary.main, 0.06)
+            : alpha(theme.palette.primary.main, 0.03),
+          transition: 'all 0.3s ease-in-out',
+          borderBottom: !timelineCollapsed ? `1px solid ${theme.palette.divider}` : 'none',
+          '&:hover': {
+            bgcolor: alpha(theme.palette.primary.main, 0.08),
+          },
         })}
       >
-        <Typography
-          variant="subtitle2"
-          sx={{
-            fontWeight: 600,
-            color: 'primary.main',
-            fontSize: '0.9rem',
-            letterSpacing: 0.3,
-          }}
+        <Box
+          sx={(theme) => ({
+            width: 40,
+            height: 40,
+            borderRadius: '50%',
+            bgcolor: alpha(theme.palette.primary.main, 0.15),
+            border: '2px solid',
+            borderColor: 'primary.main',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            mr: 2,
+            flexShrink: 0,
+          })}
         >
-          💬 AI Reasoning Flow
-        </Typography>
+          <AccountTree sx={{ fontSize: 24, color: 'primary.main' }} />
+        </Box>
+
+        <Box sx={{ flex: 1 }}>
+          <Typography variant="h6" sx={{ fontWeight: 600, fontSize: '1rem', color: 'text.primary' }}>
+            Investigation Timeline
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'text.secondary', fontSize: '0.85rem' }}>
+            {timelineCollapsed
+              ? `${stageGroups.length} ${stageGroups.length === 1 ? 'stage' : 'stages'} · Click to expand`
+              : `${stageGroups.length} ${stageGroups.length === 1 ? 'stage' : 'stages'}`}
+          </Typography>
+        </Box>
+
+        <IconButton
+          size="small"
+          onClick={(e) => {
+            e.stopPropagation();
+            setTimelineCollapsed((v) => !v);
+          }}
+          sx={(theme) => ({
+            bgcolor: alpha(theme.palette.primary.main, 0.12),
+            '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.22) },
+          })}
+        >
+          {timelineCollapsed ? <UnfoldMore /> : <ExpandLess />}
+        </IconButton>
       </Box>
 
-      {/* Content area */}
-      <Box sx={{ px: 3, pt: 3, pb: 5, bgcolor: 'background.paper', minHeight: 200 }} data-autoscroll-container>
+      <Collapse in={!timelineCollapsed} timeout={400} mountOnEnter>
+        {/* Toolbar: search + expand/collapse + copy */}
+        <CardContent sx={{ pb: 1, pt: 1, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {onSearchChange && (
+              <SessionSearchBar
+                matchCount={searchMatchCount ?? 0}
+                currentMatchIndex={currentSearchMatchIndex ?? 0}
+                onSearchChange={onSearchChange}
+                onNextMatch={onNextSearchMatch ?? NOOP}
+                onPrevMatch={onPrevSearchMatch ?? NOOP}
+                variant="inline"
+              />
+            )}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0, ml: 'auto' }}>
+              {onJumpToSummary && (
+                <Tooltip title={hasExecutiveSummary ? 'Jump to Summary' : 'Jump to Final Analysis'}>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={onJumpToSummary}
+                    endIcon={<KeyboardDoubleArrowDown sx={{ fontSize: '0.95rem' }} />}
+                    sx={{ textTransform: 'none', whiteSpace: 'nowrap', color: 'primary.main' }}
+                  >
+                    {hasExecutiveSummary ? 'Summary' : 'Final Analysis'}
+                  </Button>
+                </Tooltip>
+              )}
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={expandAllReasoning ? <ExpandLess /> : <ExpandMore />}
+                onClick={() => {
+                  setExpandAllReasoning((v) => !v);
+                  setManualOverrides(new Set());
+                }}
+                sx={{ textTransform: 'none', whiteSpace: 'nowrap' }}
+              >
+                {expandAllReasoning ? 'Collapse Reasoning' : 'Expand Reasoning'}
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={expandAllToolCalls ? <ExpandLess /> : <ExpandMore />}
+                onClick={() => setExpandAllToolCalls((v) => !v)}
+                sx={{ textTransform: 'none', whiteSpace: 'nowrap' }}
+              >
+                {expandAllToolCalls ? 'Collapse Tools' : 'Expand Tools'}
+              </Button>
+              <CopyButton
+                text={plainText}
+                variant="icon"
+                size="small"
+                tooltip="Copy chat flow"
+              />
+            </Box>
+          </Box>
+        </CardContent>
+
+        {/* Content area */}
+        <Box sx={{ px: 3, pt: 3, pb: 5, bgcolor: 'background.paper', minHeight: 200 }} data-autoscroll-container>
         {stageGroups.map((group) => {
           const isCollapsed = stageCollapseOverrides.has(group.stageId)
             ? stageCollapseOverrides.get(group.stageId)!
@@ -550,6 +587,7 @@ export default function ConversationTimeline({
         {/* Processing indicator */}
         {showProcessingIndicator && <ProcessingIndicator message={displayStatus} />}
       </Box>
+      </Collapse>
     </Card>
   );
 }

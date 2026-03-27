@@ -1,7 +1,7 @@
 import { useState, useEffect, forwardRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Paper, Typography, Box, Button, Alert, Snackbar, Collapse, IconButton, Tooltip } from '@mui/material';
-import { Psychology, ContentCopy, ExpandMore, AutoAwesome, ThumbsUpDown } from '@mui/icons-material';
+import { Paper, Typography, Box, Alert, Collapse, IconButton, Tooltip } from '@mui/material';
+import { Psychology, ExpandLess, UnfoldMore, AutoAwesome, ThumbsUpDown, ThumbUp, ThumbDown } from '@mui/icons-material';
 import { alpha } from '@mui/material/styles';
 import type { SxProps, Theme } from '@mui/material/styles';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
@@ -9,16 +9,10 @@ import CopyButton from '../shared/CopyButton';
 import ErrorCard from '../timeline/ErrorCard';
 import { ScoreBadge } from '../common/ScoreBadge';
 import { isTerminalStatus, SESSION_STATUS, type SessionStatus } from '../../constants/sessionStatus';
+import { QUALITY_RATING } from '../../types/api';
 import { sessionScoringPath } from '../../constants/routes';
 import { executiveSummaryMarkdownStyles, finalAnswerMarkdownComponents, remarkPlugins } from '../../utils/markdownComponents';
 import { getRatingConfig } from '../../constants/ratingConfig';
-
-/** Copy text to clipboard, using the modern Clipboard API with no legacy fallback. */
-function copyToClipboard(text: string, onSuccess: () => void) {
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(onSuccess).catch(() => { /* ignore */ });
-  }
-}
 
 interface FinalAnalysisCardProps {
   analysis: string | null;
@@ -37,8 +31,8 @@ interface FinalAnalysisCardProps {
   scoringStatus?: string | null;
   /** Current quality rating (if reviewed) */
   qualityRating?: string | null;
-  /** Callback when user clicks the review chip */
-  onReviewClick?: () => void;
+  /** Callback when user clicks a review icon; optional rating pre-selects in the modal */
+  onReviewClick?: (initialRating?: string) => void;
 }
 
 /**
@@ -66,7 +60,6 @@ const FinalAnalysisCard = forwardRef<HTMLDivElement, FinalAnalysisCardProps>(
   ({ analysis, summary, sessionStatus, errorMessage, collapseCounter = 0, expandCounter = 0, sessionId, latestScore, scoringStatus, qualityRating, onReviewClick }, ref) => {
     const navigate = useNavigate();
     const [analysisExpanded, setAnalysisExpanded] = useState(false);
-    const [copySuccess, setCopySuccess] = useState(false);
     const [prevAnalysis, setPrevAnalysis] = useState<string | null>(null);
     const [isNewlyUpdated, setIsNewlyUpdated] = useState(false);
 
@@ -119,8 +112,7 @@ const FinalAnalysisCard = forwardRef<HTMLDivElement, FinalAnalysisCardProps>(
     if (!displayAnalysis) return null;
 
     return (
-      <>
-        <Paper ref={ref} sx={{ p: 3 }}>
+        <Paper ref={ref} sx={{ p: 2.5 }}>
           {/* Header */}
           <Box
             sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: analysisExpanded ? 2 : 0, cursor: 'pointer', '&:hover': { opacity: 0.8 } }}
@@ -141,19 +133,44 @@ const FinalAnalysisCard = forwardRef<HTMLDivElement, FinalAnalysisCardProps>(
                 if (rating) {
                   const Icon = rating.icon;
                   return (
-                    <Tooltip title={`Reviewed: ${rating.label} — click to edit`}>
-                      <IconButton size="small" onClick={(e) => { e.stopPropagation(); onReviewClick(); }} sx={{ color: `${rating.color}.main` }}>
+                    <Tooltip title={`Reviewed as ${rating.label}`} arrow>
+                      <IconButton
+                        size="small"
+                        onClick={(e) => { e.stopPropagation(); onReviewClick(qualityRating ?? undefined); }}
+                        sx={{ color: `${rating.color}.main`, p: 0.5 }}
+                      >
                         <Icon sx={{ fontSize: 20 }} />
                       </IconButton>
                     </Tooltip>
                   );
                 }
                 return (
-                  <Tooltip title="Add review">
-                    <IconButton size="small" onClick={(e) => { e.stopPropagation(); onReviewClick(); }} sx={{ color: 'text.disabled' }}>
-                      <ThumbsUpDown sx={{ fontSize: 20 }} />
+                  <Box
+                    sx={(theme) => ({
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 0.75,
+                      bgcolor: alpha(theme.palette.warning.main, 0.08),
+                      border: `1px solid ${alpha(theme.palette.warning.main, 0.25)}`,
+                      borderRadius: 5,
+                      px: 1.25,
+                      py: 0.25,
+                    })}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 500, whiteSpace: 'nowrap', fontSize: '0.8rem' }}>
+                      Helpful?
+                    </Typography>
+                    <IconButton size="small" onClick={() => onReviewClick(QUALITY_RATING.ACCURATE)} sx={{ color: 'success.main', p: 0.4, '&:hover': { bgcolor: (theme) => alpha(theme.palette.success.main, 0.15) } }}>
+                      <ThumbUp sx={{ fontSize: 16 }} />
                     </IconButton>
-                  </Tooltip>
+                    <IconButton size="small" onClick={() => onReviewClick(QUALITY_RATING.PARTIALLY_ACCURATE)} sx={{ color: 'warning.dark', p: 0.4, '&:hover': { bgcolor: (theme) => alpha(theme.palette.warning.main, 0.15) } }}>
+                      <ThumbsUpDown sx={{ fontSize: 16 }} />
+                    </IconButton>
+                    <IconButton size="small" onClick={() => onReviewClick(QUALITY_RATING.INACCURATE)} sx={{ color: 'error.main', p: 0.4, '&:hover': { bgcolor: (theme) => alpha(theme.palette.error.main, 0.15) } }}>
+                      <ThumbDown sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Box>
                 );
               })()}
               {isNewlyUpdated && (
@@ -163,18 +180,11 @@ const FinalAnalysisCard = forwardRef<HTMLDivElement, FinalAnalysisCardProps>(
               )}
             </Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Button
-                startIcon={<ContentCopy />} variant="outlined" size="small"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const text = getCombinedDocument();
-                  copyToClipboard(text, () => setCopySuccess(true));
-                }}
-              >
-                Copy {isFakeAnalysis ? 'Message' : 'Analysis'}
-              </Button>
-              <IconButton size="small" onClick={(e) => { e.stopPropagation(); setAnalysisExpanded(!analysisExpanded); }} sx={{ transition: 'transform 0.4s', transform: analysisExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
-                <ExpandMore />
+              <Box onClick={(e) => e.stopPropagation()}>
+                <CopyButton text={getCombinedDocument()} variant="icon" size="small" tooltip={`Copy ${isFakeAnalysis ? 'message' : 'analysis'}`} />
+              </Box>
+              <IconButton size="small" onClick={(e) => { e.stopPropagation(); setAnalysisExpanded(!analysisExpanded); }} sx={{ bgcolor: (theme) => alpha(theme.palette.primary.main, 0.12), '&:hover': { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.22) } }}>
+                {analysisExpanded ? <ExpandLess /> : <UnfoldMore />}
               </IconButton>
             </Box>
           </Box>
@@ -191,7 +201,7 @@ const FinalAnalysisCard = forwardRef<HTMLDivElement, FinalAnalysisCardProps>(
 
           {/* Executive Summary — always visible */}
           {summary && (
-            <Box sx={{ mt: 2 }}>
+            <Box sx={{ mt: 2 }} data-executive-summary>
               <Box sx={{ bgcolor: (theme) => alpha(theme.palette.success.main, 0.10), border: '1px solid', borderColor: (theme) => alpha(theme.palette.success.main, 0.35), borderRadius: 2, p: 2.5, position: 'relative', overflow: 'hidden', '&::before': { content: '""', position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, bgcolor: 'success.main', borderRadius: '4px 0 0 4px' } }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -241,14 +251,6 @@ const FinalAnalysisCard = forwardRef<HTMLDivElement, FinalAnalysisCardProps>(
             )}
           </Collapse>
         </Paper>
-
-        <Snackbar
-          open={copySuccess} autoHideDuration={3000}
-          onClose={() => setCopySuccess(false)}
-          message="Analysis copied to clipboard"
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-        />
-      </>
     );
   }
 );
