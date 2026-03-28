@@ -99,7 +99,7 @@ func TestE2E_MemoryInjectionAndRecall(t *testing.T) {
 	chainID := "memory-chain"
 
 	// Seed memories that will be found by the investigation's similarity search.
-	err = memSvc.ApplyReflectorActions(ctx, "default", sourceSession.ID, &alertType, &chainID, 80,
+	err = memSvc.ApplyReflectorActions(ctx, "default", sourceSession.ID, &alertType, &chainID,
 		&memory.ReflectorResult{Create: []memory.ReflectorCreateAction{
 			{Content: "Check PgBouncer connection pool health before investigating query latency", Category: "procedural", Valence: "positive"},
 			{Content: "Normal error rate for batch-processor during 2-4am is ~200/hr", Category: "semantic", Valence: "neutral"},
@@ -108,7 +108,7 @@ func TestE2E_MemoryInjectionAndRecall(t *testing.T) {
 
 	// Also seed a memory that won't be auto-injected (limit=5 but only 2 seeded)
 	// but can be found via the recall tool.
-	err = memSvc.ApplyReflectorActions(ctx, "default", sourceSession.ID, &alertType, &chainID, 80,
+	err = memSvc.ApplyReflectorActions(ctx, "default", sourceSession.ID, &alertType, &chainID,
 		&memory.ReflectorResult{Create: []memory.ReflectorCreateAction{
 			{Content: "container_memory_rss metric does not exist in this setup", Category: "procedural", Valence: "negative"},
 		}})
@@ -204,8 +204,8 @@ func TestE2E_MemoryInjectionAndRecall(t *testing.T) {
 		"Lessons from Past Investigations",
 		"Tier 4 memory section should be in investigation system prompt")
 	assertSystemPromptContains(t, investigatorInput,
-		"[procedural, positive, learned",
-		"seeded procedural memory should be in investigation prompt with age label")
+		"[procedural, positive, score:",
+		"seeded procedural memory should be in investigation prompt with score")
 	assertSystemPromptContains(t, investigatorInput,
 		"Check PgBouncer connection pool health",
 		"seeded procedural memory content should be in investigation prompt")

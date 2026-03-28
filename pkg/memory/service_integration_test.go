@@ -65,7 +65,7 @@ func TestService_ApplyReflectorActions_CreateAndQuery(t *testing.T) {
 		},
 	}
 
-	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 75, result)
+	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, result)
 	require.NoError(t, err)
 
 	// Verify memories are queryable via FindSimilar.
@@ -77,9 +77,8 @@ func TestService_ApplyReflectorActions_CreateAndQuery(t *testing.T) {
 	assert.Contains(t, contents, "Check PgBouncer health first")
 	assert.Contains(t, contents, "OOMKill uses working_set_bytes")
 
-	// Score 75 → confidence 0.6
 	for _, m := range memories {
-		assert.InDelta(t, 0.6, m.Confidence, 0.01)
+		assert.InDelta(t, 0.7, m.Confidence, 0.01)
 		assert.Equal(t, 1, m.SeenCount)
 	}
 
@@ -99,7 +98,7 @@ func TestService_ApplyReflectorActions_Reinforce(t *testing.T) {
 	ctx := t.Context()
 
 	// Create a memory first.
-	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 80, &memory.ReflectorResult{
+	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, &memory.ReflectorResult{
 		Create: []memory.ReflectorCreateAction{
 			{Content: "Always check certs", Category: "procedural", Valence: "positive"},
 		},
@@ -112,11 +111,11 @@ func TestService_ApplyReflectorActions_Reinforce(t *testing.T) {
 	require.Len(t, memories, 1)
 
 	original := memories[0]
-	assert.InDelta(t, 0.8, original.Confidence, 0.01) // score 80 → 0.8
+	assert.InDelta(t, 0.7, original.Confidence, 0.01)
 	assert.Equal(t, 1, original.SeenCount)
 
 	// Reinforce it.
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 80, &memory.ReflectorResult{
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, &memory.ReflectorResult{
 		Reinforce: []memory.ReflectorReinforceAction{{MemoryID: original.ID}},
 	})
 	require.NoError(t, err)
@@ -125,7 +124,7 @@ func TestService_ApplyReflectorActions_Reinforce(t *testing.T) {
 	updated, err := svc.FindSimilar(ctx, "default", "certs", 1)
 	require.NoError(t, err)
 	require.Len(t, updated, 1)
-	assert.InDelta(t, 0.88, updated[0].Confidence, 0.01) // 0.8 * 1.1 = 0.88
+	assert.InDelta(t, 0.77, updated[0].Confidence, 0.01) // 0.7 * 1.1 = 0.77
 	assert.Equal(t, 2, updated[0].SeenCount)
 }
 
@@ -134,7 +133,7 @@ func TestService_ApplyReflectorActions_Deprecate(t *testing.T) {
 	ctx := t.Context()
 
 	// Create then deprecate.
-	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 60, &memory.ReflectorResult{
+	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, &memory.ReflectorResult{
 		Create: []memory.ReflectorCreateAction{
 			{Content: "Outdated fact", Category: "semantic", Valence: "neutral"},
 		},
@@ -146,7 +145,7 @@ func TestService_ApplyReflectorActions_Deprecate(t *testing.T) {
 	require.Len(t, memories, 1)
 	memID := memories[0].ID
 
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 60, &memory.ReflectorResult{
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, &memory.ReflectorResult{
 		Deprecate: []memory.ReflectorDeprecateAction{{MemoryID: memID, Reason: "no longer true"}},
 	})
 	require.NoError(t, err)
@@ -161,7 +160,7 @@ func TestService_ApplyReflectorActions_InvalidEnums(t *testing.T) {
 	svc, sessionID := newTestService(t, []float32{1, 0, 0})
 	ctx := t.Context()
 
-	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 80, &memory.ReflectorResult{
+	err := svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, &memory.ReflectorResult{
 		Create: []memory.ReflectorCreateAction{
 			{Content: "Bad category", Category: "invented", Valence: "positive"},
 			{Content: "Bad valence", Category: "semantic", Valence: "invented"},
@@ -180,7 +179,7 @@ func TestService_ApplyReflectorActions_InvalidEnums(t *testing.T) {
 func TestService_ApplyReflectorActions_NilResult(t *testing.T) {
 	svc, sessionID := newTestService(t, []float32{1, 1, 1})
 
-	err := svc.ApplyReflectorActions(t.Context(), "default", sessionID, nil, nil, 50, nil)
+	err := svc.ApplyReflectorActions(t.Context(), "default", sessionID, nil, nil, nil)
 	assert.NoError(t, err)
 }
 
@@ -202,7 +201,7 @@ func TestService_ApplyReflectorActions_WithScopeMetadata(t *testing.T) {
 
 	alertType := "cpu_high"
 	chainID := "infra"
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, &chainID, 90, &memory.ReflectorResult{
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, &chainID, &memory.ReflectorResult{
 		Create: []memory.ReflectorCreateAction{
 			{Content: "Scoped memory", Category: "semantic", Valence: "positive"},
 		},
@@ -242,19 +241,19 @@ func TestService_FindSimilarWithBoosts(t *testing.T) {
 	// Create memories with different scope metadata.
 	// Identical embeddings → cosine distance is the same; ranking
 	// differences come exclusively from the scope boosts.
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, &chainID, 80,
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, &chainID,
 		&memory.ReflectorResult{Create: []memory.ReflectorCreateAction{
 			{Content: "Both scopes", Category: "semantic", Valence: "positive"},
 		}})
 	require.NoError(t, err)
 
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, nil, 80,
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, nil,
 		&memory.ReflectorResult{Create: []memory.ReflectorCreateAction{
 			{Content: "Alert only", Category: "semantic", Valence: "positive"},
 		}})
 	require.NoError(t, err)
 
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil, 80,
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, nil, nil,
 		&memory.ReflectorResult{Create: []memory.ReflectorCreateAction{
 			{Content: "No scopes", Category: "semantic", Valence: "positive"},
 		}})
@@ -268,6 +267,14 @@ func TestService_FindSimilarWithBoosts(t *testing.T) {
 	assert.Equal(t, "Both scopes", memories[0].Content)
 	assert.Equal(t, "Alert only", memories[1].Content)
 	assert.Equal(t, "No scopes", memories[2].Content)
+
+	// Score should be populated and positive for all results.
+	for _, m := range memories {
+		assert.Greater(t, m.Score, 0.0, "Score should be populated")
+	}
+	// Boosted memories should have higher scores.
+	assert.Greater(t, memories[0].Score, memories[1].Score)
+	assert.Greater(t, memories[1].Score, memories[2].Score)
 }
 
 // TestService_FindSimilarWithBoosts_CandidateReranking verifies the two-step
@@ -293,7 +300,8 @@ func TestService_FindSimilarWithBoosts_CandidateReranking(t *testing.T) {
 	alertType := "cpu_high"
 	chainID := "infra"
 
-	// Memory 1: identical to query (cosine distance=0), no scope match → score = 1.0
+	// Memory 1: identical to query (cosine distance=0), no scope match.
+	// Score ≈ 1.0 * (0.7 + 0.3*0.8) * 1.0 = 0.94
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO investigation_memories
 			(memory_id, project, content, category, valence, confidence, seen_count,
@@ -305,7 +313,7 @@ func TestService_FindSimilarWithBoosts_CandidateReranking(t *testing.T) {
 
 	// Memory 2: farther from query (cosine distance≈0.04), both scopes match.
 	// [0.96, 0.28, 0] has |v|=1.0, so cosine_sim=0.96, distance=0.04.
-	// Score = (1 - 0.04) + 0.05 + 0.03 = 1.04 → wins after re-ranking.
+	// Score ≈ 0.96 * (0.7 + 0.3*0.8) * 1.0 + 0.05 + 0.03 ≈ 0.98 → wins.
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO investigation_memories
 			(memory_id, project, content, category, valence, confidence, seen_count,
@@ -330,6 +338,157 @@ func TestService_FindSimilarWithBoosts_CandidateReranking(t *testing.T) {
 	assert.Equal(t, "Close but no boost", memories[1].Content)
 }
 
+// TestService_FindSimilarWithBoosts_SimilarityThreshold verifies that memories
+// below the similarity threshold are filtered out, even when the database has
+// matching rows.
+func TestService_FindSimilarWithBoosts_SimilarityThreshold(t *testing.T) {
+	entClient, db := util.SetupTestDatabase(t)
+	ctx := t.Context()
+
+	_, err := db.ExecContext(ctx, `ALTER TABLE investigation_memories ADD COLUMN IF NOT EXISTS embedding vector(3)`)
+	require.NoError(t, err)
+
+	sessionID := uuid.New().String()
+	_, err = entClient.AlertSession.Create().
+		SetID(sessionID).SetAlertData("test").SetAgentType("test").
+		SetChainID("test-chain").SetStatus("completed").Save(ctx)
+	require.NoError(t, err)
+
+	cfg := &config.MemoryConfig{Enabled: true, Embedding: config.EmbeddingConfig{Dimensions: 3}}
+	// Query vector: [1, 0, 0]
+	svc := memory.NewService(entClient, db, &fakeEmbedder{vec: []float32{1, 0, 0}}, cfg)
+
+	// Memory 1: identical to query → cosine similarity = 1.0 (well above 0.45 threshold).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO investigation_memories
+			(memory_id, project, content, category, valence, confidence, seen_count,
+			 source_session_id, created_at, updated_at, last_seen_at, deprecated, embedding)
+		VALUES ($1, 'default', 'Very relevant', 'semantic', 'positive', 0.7, 1,
+			 $2, NOW(), NOW(), NOW(), false, '[1,0,0]'::vector)`,
+		uuid.New().String(), sessionID)
+	require.NoError(t, err)
+
+	// Memory 2: nearly orthogonal → cosine similarity ≈ 0.27 (below 0.45 threshold).
+	// [0.27, 0.96, 0] is unit-length, cosine_sim([1,0,0], [0.27,0.96,0]) ≈ 0.27.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO investigation_memories
+			(memory_id, project, content, category, valence, confidence, seen_count,
+			 source_session_id, created_at, updated_at, last_seen_at, deprecated, embedding)
+		VALUES ($1, 'default', 'Irrelevant', 'semantic', 'positive', 0.7, 1,
+			 $2, NOW(), NOW(), NOW(), false, '[0.27,0.96,0]'::vector)`,
+		uuid.New().String(), sessionID)
+	require.NoError(t, err)
+
+	t.Run("filters below threshold", func(t *testing.T) {
+		memories, err := svc.FindSimilarWithBoosts(ctx, "default", "anything", nil, nil, 10)
+		require.NoError(t, err)
+		require.Len(t, memories, 1, "only the memory above threshold should be returned")
+		assert.Equal(t, "Very relevant", memories[0].Content)
+	})
+
+	t.Run("all below threshold returns empty", func(t *testing.T) {
+		// Query vector: [0, 0, 1] — orthogonal to both memories.
+		orthogonalSvc := memory.NewService(entClient, db, &fakeEmbedder{vec: []float32{0, 0, 1}}, cfg)
+		memories, err := orthogonalSvc.FindSimilarWithBoosts(ctx, "default", "anything", nil, nil, 10)
+		require.NoError(t, err)
+		assert.Empty(t, memories)
+	})
+}
+
+// TestService_FindSimilarWithBoosts_TemporalDecay verifies that newer memories
+// rank higher than older ones when embeddings and confidence are identical.
+func TestService_FindSimilarWithBoosts_TemporalDecay(t *testing.T) {
+	entClient, db := util.SetupTestDatabase(t)
+	ctx := t.Context()
+
+	_, err := db.ExecContext(ctx, `ALTER TABLE investigation_memories ADD COLUMN IF NOT EXISTS embedding vector(3)`)
+	require.NoError(t, err)
+
+	sessionID := uuid.New().String()
+	_, err = entClient.AlertSession.Create().
+		SetID(sessionID).SetAlertData("test").SetAgentType("test").
+		SetChainID("test-chain").SetStatus("completed").Save(ctx)
+	require.NoError(t, err)
+
+	cfg := &config.MemoryConfig{Enabled: true, Embedding: config.EmbeddingConfig{Dimensions: 3}}
+	svc := memory.NewService(entClient, db, &fakeEmbedder{vec: []float32{1, 0, 0}}, cfg)
+
+	// Both memories have identical embeddings and confidence, only updated_at differs.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO investigation_memories
+			(memory_id, project, content, category, valence, confidence, seen_count,
+			 source_session_id, created_at, updated_at, last_seen_at, deprecated, embedding)
+		VALUES ($1, 'default', 'Old memory', 'semantic', 'positive', 0.7, 1,
+			 $2, NOW() - INTERVAL '180 days', NOW() - INTERVAL '180 days',
+			 NOW() - INTERVAL '180 days', false, '[1,0,0]'::vector)`,
+		uuid.New().String(), sessionID)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO investigation_memories
+			(memory_id, project, content, category, valence, confidence, seen_count,
+			 source_session_id, created_at, updated_at, last_seen_at, deprecated, embedding)
+		VALUES ($1, 'default', 'Fresh memory', 'semantic', 'positive', 0.7, 1,
+			 $2, NOW(), NOW(), NOW(), false, '[1,0,0]'::vector)`,
+		uuid.New().String(), sessionID)
+	require.NoError(t, err)
+
+	memories, err := svc.FindSimilarWithBoosts(ctx, "default", "anything", nil, nil, 10)
+	require.NoError(t, err)
+	require.Len(t, memories, 2)
+
+	assert.Equal(t, "Fresh memory", memories[0].Content, "newer memory should rank first")
+	assert.Equal(t, "Old memory", memories[1].Content)
+	assert.Greater(t, memories[0].Score, memories[1].Score,
+		"fresh memory score should be higher due to temporal decay")
+}
+
+// TestService_FindSimilarWithBoosts_ConfidenceRanking verifies that higher-confidence
+// memories rank higher when embeddings and age are identical.
+func TestService_FindSimilarWithBoosts_ConfidenceRanking(t *testing.T) {
+	entClient, db := util.SetupTestDatabase(t)
+	ctx := t.Context()
+
+	_, err := db.ExecContext(ctx, `ALTER TABLE investigation_memories ADD COLUMN IF NOT EXISTS embedding vector(3)`)
+	require.NoError(t, err)
+
+	sessionID := uuid.New().String()
+	_, err = entClient.AlertSession.Create().
+		SetID(sessionID).SetAlertData("test").SetAgentType("test").
+		SetChainID("test-chain").SetStatus("completed").Save(ctx)
+	require.NoError(t, err)
+
+	cfg := &config.MemoryConfig{Enabled: true, Embedding: config.EmbeddingConfig{Dimensions: 3}}
+	svc := memory.NewService(entClient, db, &fakeEmbedder{vec: []float32{1, 0, 0}}, cfg)
+
+	// Both memories have identical embeddings and updated_at, only confidence differs.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO investigation_memories
+			(memory_id, project, content, category, valence, confidence, seen_count,
+			 source_session_id, created_at, updated_at, last_seen_at, deprecated, embedding)
+		VALUES ($1, 'default', 'Low confidence', 'semantic', 'positive', 0.3, 1,
+			 $2, NOW(), NOW(), NOW(), false, '[1,0,0]'::vector)`,
+		uuid.New().String(), sessionID)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO investigation_memories
+			(memory_id, project, content, category, valence, confidence, seen_count,
+			 source_session_id, created_at, updated_at, last_seen_at, deprecated, embedding)
+		VALUES ($1, 'default', 'High confidence', 'semantic', 'positive', 0.95, 1,
+			 $2, NOW(), NOW(), NOW(), false, '[1,0,0]'::vector)`,
+		uuid.New().String(), sessionID)
+	require.NoError(t, err)
+
+	memories, err := svc.FindSimilarWithBoosts(ctx, "default", "anything", nil, nil, 10)
+	require.NoError(t, err)
+	require.Len(t, memories, 2)
+
+	assert.Equal(t, "High confidence", memories[0].Content, "higher confidence should rank first")
+	assert.Equal(t, "Low confidence", memories[1].Content)
+	assert.Greater(t, memories[0].Score, memories[1].Score)
+}
+
 func TestService_CreateMemory_PersistsAllColumns(t *testing.T) {
 	entClient, db := util.SetupTestDatabase(t)
 	ctx := t.Context()
@@ -348,7 +507,7 @@ func TestService_CreateMemory_PersistsAllColumns(t *testing.T) {
 
 	alertType := "cpu_high"
 	chainID := "infra"
-	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, &chainID, 90, &memory.ReflectorResult{
+	err = svc.ApplyReflectorActions(ctx, "default", sessionID, &alertType, &chainID, &memory.ReflectorResult{
 		Create: []memory.ReflectorCreateAction{
 			{Content: "Always check logs first", Category: "procedural", Valence: "positive"},
 		},
@@ -366,7 +525,7 @@ func TestService_CreateMemory_PersistsAllColumns(t *testing.T) {
 	assert.Equal(t, "Always check logs first", mem.Content)
 	assert.Equal(t, investigationmemory.CategoryProcedural, mem.Category)
 	assert.Equal(t, investigationmemory.ValencePositive, mem.Valence)
-	assert.InDelta(t, 0.8, mem.Confidence, 0.01) // score 90 → 0.8
+	assert.InDelta(t, 0.7, mem.Confidence, 0.01)
 	assert.Equal(t, 1, mem.SeenCount)
 	assert.Equal(t, sessionID, mem.SourceSessionID)
 	require.NotNil(t, mem.AlertType)
