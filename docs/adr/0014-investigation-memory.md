@@ -34,11 +34,12 @@ TARSy already produces the raw material for memory extraction:
 ## Design Principles
 
 1. **Memory is a light touch.** Complementary hints for specific/repeating situations, not a playbook. The LLM's investigative creativity is preserved.
-2. **Semantic-first retrieval.** pgvector cosine similarity drives ranking. Investigation scope metadata (`alert_type`, `chain_id`) is a soft boost, never a hard filter. Infrastructure-specific context (service names, clusters, regions) lives in the memory content itself and is matched via semantic search. Project is the only hard filter (security boundary).
-3. **Zero manual tuning.** No thresholds, no fallback levels, no scoring weights to calibrate. The `max_inject` cap (default: 5) is the noise control. Scope metadata soft boosts (`+0.05` for alert_type, `+0.03` for chain_id) are fixed implementation constants — negligible tiebreakers, not weights to tune.
-4. **Embedded extraction.** Memory extraction runs as a separate LLM call within the scoring stage — triggered by the `ScoringExecutor` after the scoring controller completes. No new infrastructure, near-zero marginal cost.
-5. **In-prompt dedup.** The Reflector sees existing memories and decides what to create, reinforce, or deprecate in one pass.
-6. **Future-proof for multi-tenancy.** `project` field from day one, hard-filtered on every query.
+2. **Precision over recall.** It is better to return no memories than to return low-relevance or irrelevant ones. Noisy memories mislead the agent, waste context window, and erode trust. Every returned memory must pass the vector similarity threshold (0.7); keyword matches only boost already-relevant results via RRF, they cannot create standalone results.
+3. **Semantic-first retrieval.** pgvector cosine similarity drives ranking. Infrastructure-specific context (service names, clusters, regions) lives in the memory content itself and is matched via semantic search. Project is the only hard filter (security boundary).
+4. **Minimal tuning surface.** The `max_inject` cap (default: 5) and the similarity threshold (0.7) are the primary controls. A conservative injection score floor (0.01) catches very-low-ranked or heavily-decayed matches. Scope boosts for `alert_type`/`chain_id` were removed — the few alert types made them nearly universal and non-discriminating.
+5. **Embedded extraction.** Memory extraction runs as a separate LLM call within the scoring stage — triggered by the `ScoringExecutor` after the scoring controller completes. No new infrastructure, near-zero marginal cost.
+6. **In-prompt dedup.** The Reflector sees existing memories and decides what to create, reinforce, or deprecate in one pass.
+7. **Future-proof for multi-tenancy.** `project` field from day one, hard-filtered on every query.
 
 ## Decisions
 
@@ -48,7 +49,7 @@ TARSy already produces the raw material for memory extraction:
 |---|----------|----------|-----------|
 | S1 | Storage backend | PostgreSQL with pgvector | Semantic-first retrieval without a separate vector DB. Memory entries are short and discrete, so the embedding pipeline is lightweight. |
 | S2 | Explicit categories | Enum: `semantic`, `episodic`, `procedural` | Well-established in memory research, maps to distinct TARSy use cases. Enables differentiated display and lifecycle rules. Categories don't hard-filter — they provide structured context. |
-| S3 | Prompt injection method | Hybrid: auto-inject top N + `recall_past_investigations` tool | Auto-injection solves the cold-start problem (agent never wrote these memories). Tool enables deeper exploration when injected hints trigger curiosity. |
+| S3 | Prompt injection method | Hybrid: auto-inject top N + `recall_past_investigations` tool + `search_past_sessions` tool | Auto-injection solves the cold-start problem. `recall_past_investigations` enables deeper exploration of distilled learnings. `search_past_sessions` provides entity-level recall from raw investigation history. |
 | S4 | Quality signal source | Score-triggered extraction + human review refinement | Automated score drives initial extraction (no human bottleneck). `quality_rating` from [ADR-0013](0013-review-feedback-redesign.md) provides unambiguous refinement signal. |
 | S5 | Extraction timing | Embedded in scoring stage (separate LLM call) | Reuses investigation context already built for scoring. Separate conversation gives the Reflector its own system prompt. Near-zero new infrastructure. |
 | S6 | Retrieval strategy | Semantic-first (pgvector cosine similarity) | Zero manual tuning. Cross-cutting knowledge surfaces naturally. Cold start handled gracefully. Auto-inject cap is the noise control. |
@@ -63,10 +64,10 @@ TARSy already produces the raw material for memory extraction:
 | D1 | Embedding model | Google `gemini-embedding-2-preview` at 768 dims | MTEB English #1 (67.99 at 768 dims — negligible loss from full 3072). Same `GOOGLE_API_KEY` already configured. Zero-config path. Configurable via `defaults.memory.embedding`. |
 | D2 | pgvector index | HNSW (`m=16, ef_construction=64, vector_cosine_ops`) | Best recall for small-to-medium datasets, no training phase, always up-to-date after inserts. |
 | D3 | Reflector parse failures | Lenient JSON parsing + silent fallback | Strict parse → strip markdown fences → bracket-depth extraction. On failure, log warning and proceed with "no memories." Extraction never blocks scoring. |
-| D4 | `recall_past_investigations` parameters | Free-text `query` + optional `limit` | Semantic search handles intent better than the LLM constructing filter parameters. Structured filters can be added later. |
+| D4 | Memory tool parameters | `recall_past_investigations`: free-text `query` + `limit`. `search_past_sessions`: keyword `query` + `alert_type` + `days_back` + `limit` | Semantic search for distilled learnings; keyword search for entity-level session lookup. Different retrieval methods for different use cases. |
 | D5 | Review refinement trigger | Inline multiplicative confidence + background Reflector for feedback text | Part 1 (sync): `quality_rating` adjusts confidence. Part 2 (async): `investigation_feedback` text triggers a Reflector variant that creates/deprecates/reinforces memories. |
 | D6 | Bulk memory API | Not in v1 | Per-memory CRUD suffices for expected scale. |
-| D7 | Memory decay | Not in v1 | Reflector handles explicit deprecation. Future: query-time decay multiplier `score × e^(-λ × age_in_days)` — no data mutation, reversible via config. |
+| D7 | Memory decay | Query-time temporal decay | `EXP(-0.0077 × age_in_days)` multiplier (90-day half-life) based on `updated_at`. Reinforcement resets the clock. No data mutation. |
 | D8 | Storing injected memory IDs | Many-to-many Ent edge (join table) | Both query directions natural: `session.QueryInjectedMemories()` and `memory.QueryInjectedIntoSessions()`. |
 
 ## Architecture
@@ -95,14 +96,21 @@ TARSy already produces the raw material for memory extraction:
                                     │    pgvector)        │
                                     └─────────┬───────────┘
                                               │
-                              ┌───────────────┼───────────────┐
-                              │               │               │
-                              ▼               ▼               ▼
-                      ┌──────────┐    ┌───────────┐    ┌──────────┐
-                      │ Prompt   │    │ Session   │    │ Human    │
-                      │ Injection│    │ Detail +  │    │ Review   │
-                      │ (Tier 4) │    │ API       │    │ Feedback │
-                      └──────────┘    └───────────┘    └──────────┘
+                      ┌───────────────┬───────┼───────────┬───────────┐
+                      │               │       │           │           │
+                      ▼               ▼       ▼           ▼           ▼
+              ┌──────────┐   ┌────────────┐  ┌───────────┐  ┌──────────┐
+              │ Prompt   │   │ recall_past│  │search_past│  │ Human    │
+              │ Injection│   │ investiga- │  │ _sessions │  │ Review   │
+              │ (Tier 4) │   │ tions tool │  │ tool      │  │ Feedback │
+              └──────────┘   └────────────┘  └─────┬─────┘  └──────────┘
+                                                   │
+                                          ┌────────▼──────────┐
+                                          │ alert_sessions    │
+                                          │ (FTS: tsvector)   │
+                                          │        +          │
+                                          │ LLM summarization │
+                                          └───────────────────┘
 ```
 
 ### Data Model: InvestigationMemory
@@ -124,10 +132,11 @@ Each memory is a discrete learning — a sentence to a short paragraph — with 
 | `alert_type` | string (optional) | Soft boost signal for retrieval |
 | `chain_id` | string (optional) | Soft boost signal for retrieval |
 | `embedding` | vector(768) | pgvector column for cosine similarity search |
+| `search_vector` | tsvector (generated) | Full-text search column for hybrid keyword matching (`'simple'` config) |
 | `deprecated` | bool | Excluded from retrieval when true |
 | `last_seen_at` | timestamp | Last reinforcement time |
 
-**Indexes:** project (security boundary), project + deprecated (active memories), source_session_id, category, HNSW on embedding column.
+**Indexes:** project (security boundary), project + deprecated (active memories), source_session_id, category, HNSW on embedding column, GIN on search_vector.
 
 **Edges:** Source session (one-to-many), injected-into sessions (many-to-many via join table).
 
@@ -166,16 +175,22 @@ ScoringExecutor.runScoring()
 **Why a separate conversation:** The scoring system prompt defines a "quality evaluator" role. The Reflector needs a "memory extraction specialist" role. A fresh conversation gives each a clean, purpose-built prompt without role conflict.
 
 **Reflector output actions:**
-- **CREATE** — genuinely new knowledge; executor generates embedding and assigns initial confidence based on investigation score
+- **CREATE** — genuinely new knowledge; executor generates embedding and assigns initial confidence of 0.7
 - **REINFORCE** — existing memory confirmed; `confidence = min(confidence × 1.1, 1.0)`, `seen_count++`
 - **DEPRECATE** — existing memory contradicted; sets `deprecated = true`
 
-**Quality guidelines in the Reflector prompt:**
+**Extraction boundaries in the Reflector prompt:**
+- Tool limitations, bugs, and workarounds do NOT belong in memories (belong in tool reports/skills)
+- Domain-generic procedures do NOT belong in memories (belong in skills/runbooks)
+- Speculative findings must not be extracted (only confirmed learnings)
+- Skill content already loaded by the agent must not be duplicated
+- Aim for 0-3 new memories per investigation; empty arrays are the expected outcome for routine investigations
+
+**Quality guidelines:**
 - Extract only learnings that would concretely help a future investigation
 - Ground every learning in specific evidence from the investigation
-- Do not duplicate skill content (skills are visible in the timeline)
 - Prefer specific and actionable over vague and general
-- Return empty arrays when existing memories already cover the lessons
+- Negative learnings from mistakes are especially valuable
 
 ### Prerequisite: Required Skills in Timeline
 
@@ -211,23 +226,27 @@ Memory scoping has two distinct layers:
 
 ### Memory Retrieval (Auto-Injection)
 
-At investigation start, the session executor retrieves the top `max_inject` memories by cosine similarity within the project boundary.
+At investigation start, the session executor retrieves the top `max_inject` memories using hybrid search (vector + keyword) with Reciprocal Rank Fusion (RRF).
 
-**Retrieval query shape:**
+**Retrieval query shape (hybrid search):**
+
+The query uses four CTEs: (0) convert query terms to an OR-joined tsquery, (1) vector candidates via pgvector HNSW with a similarity threshold `(1 - distance) >= 0.7`, (2) keyword candidates via tsvector/GIN with `'simple'` config, (3) RRF fusion via LEFT JOIN (k=60). The outer query applies confidence weighting and temporal decay:
 
 ```text
-SELECT memory_id, content, category, valence, confidence, cosine_similarity
-FROM investigation_memories
-WHERE project = $project AND deprecated = false
-ORDER BY
-  similarity
-  + CASE WHEN alert_type = $alert_type THEN 0.05 ELSE 0 END
-  + CASE WHEN chain_id  = $chain_id  THEN 0.03 ELSE 0 END
-  DESC
-LIMIT $max_inject
+final_score = rrf_score
+  × (0.7 + 0.3 × confidence)
+  × EXP(-0.0077 × age_in_days)
 ```
 
-Project is the hard security filter. `alert_type` and `chain_id` are minor soft boosts — same-type memories rank slightly higher, but cross-cutting knowledge always surfaces if semantically relevant.
+Scope boosts for `alert_type` and `chain_id` were removed: there are only a few alert types and chain_id almost always follows alert_type, so the boosts were nearly always "on" and didn't meaningfully discriminate. Content similarity (RRF), confidence, and temporal decay are sufficient.
+
+- **Similarity threshold (0.7):** The quality gate — every result must pass this cosine similarity floor. At 0.7, memories must be topically related, not just "same Kubernetes domain." Better to return nothing than noise.
+- **Vector-required results:** Keyword matches only boost vector-matched memories via RRF (LEFT JOIN, not FULL OUTER). Keyword-only matches (no vector relevance) are excluded entirely. This prevents common-term keyword noise (e.g. "namespace", "pod") from surfacing irrelevant memories.
+- **Minimum injection score (0.01):** Conservative floor for auto-injection — catches very-low-ranked or heavily-decayed matches that slipped past the similarity threshold.
+- **Confidence weighting:** Human-reviewed memories rank higher at similar semantic distances.
+- **Temporal decay (90-day half-life):** Unreinforced memories fade naturally. Reinforcement via the Reflector resets the clock (`updated_at`).
+
+Project is the hard security filter.
 
 **Prompt injection (Tier 4):** After Tier 3 (custom instructions), a "Lessons from Past Investigations" section is appended with category/valence tags:
 
@@ -243,9 +262,23 @@ Project is the hard security filter. `alert_type` and `chain_id` are minor soft 
 
 ### `recall_past_investigations` Tool
 
-A pseudo-MCP tool (like `load_skill`) that wraps semantic memory search. Accepts a free-text `query` and optional `limit` (default: 10, max: 20). Uses the same retrieval query shape as auto-injection, excluding already-injected memory IDs.
+A pseudo-MCP tool that wraps hybrid memory search. Accepts a free-text `query` and optional `limit` (default: 10, max: 20). Uses the same retrieval query shape as auto-injection, excluding already-injected memory IDs. Results include similarity scores so the agent can gauge relevance.
 
-Registered for both investigation and chat sessions. Chat sessions do not get Tier 4 auto-injection — the agent explicitly decides when to recall past investigations. Memory extraction does not happen for chat sessions.
+**Description:** "Search distilled knowledge from past investigations — reusable patterns, procedures, environment quirks, and anti-patterns. Use for situational questions like 'what do we know about this type of workload?', 'how should I handle this category of alert?', or 'what are common false positives here?'. Returns generalized learnings, NOT specific investigation history — will not find particular users, namespaces, or session details."
+
+### `search_past_sessions` Tool
+
+A pseudo-MCP tool for entity-level recall: searches `alert_sessions` by keywords in `alert_data` using PostgreSQL full-text search with AND logic (all query terms must be present). Addresses the structural entity-recall gap — agents can now check "have we investigated this user/namespace/workload before?"
+
+**Parameters:** `query` (string, required), `alert_type` (string, optional), `days_back` (integer, optional, default 30), `limit` (integer, optional, default 5, max 10).
+
+**Execution flow:** tsvector query finds matching completed sessions (excluding the current session via `ExcludeSessionID` to avoid returning itself) → session data (alert_data, final_analysis, quality_rating, investigation_feedback) bundled into a summarization request. The tool returns raw data with a `RequiredSummarization` flag; the agent controller runs the LLM call via `callSummarizationLLM`, records the `LLMInteraction`, and replaces the tool result content with the summary. The dashboard shows a single tool call card with the summary (no separate `mcp_tool_summary` event). On LLM failure, returns an error (no fallback to raw data).
+
+**Database:** `search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple', alert_data)) STORED` with GIN index. The `'simple'` config preserves identifiers without stemming.
+
+**Description:** "Search past investigation sessions by keywords in alert data. Use to check if a specific entity (e.g. user, namespace, workload, IP, service) was investigated before — critical for escalation and pattern-of-behavior decisions. Pass specific identifiers as the query — one or a few key terms per call. For unrelated identifiers, make separate calls. Do NOT pass natural language sentences."
+
+Both tools are registered for investigation and chat sessions. Chat sessions do not get Tier 4 auto-injection — the agent explicitly decides when to use memory/session search tools. Memory extraction does not happen for chat sessions.
 
 ### Human Review Refinement
 
@@ -267,20 +300,13 @@ This is the primary mechanism for learning from mistakes: `inaccurate` reviews d
 
 ### Confidence Model
 
-Memory quality is determined by two signal types: **automated** (score 0-100, failure tags, tool improvement report — determines initial valence and confidence) and **human** (`quality_rating` adjusts confidence, `investigation_feedback` triggers targeted memory creation/deprecation). Valence tags each memory as a pattern to repeat (`positive`), avoid (`negative`), or note (`neutral`) — preventing the system from learning the wrong lesson from a bad investigation.
+Confidence is a pure human/reinforcement signal. All auto-extracted memories start at a flat `0.7` regardless of investigation score — the Reflector is the quality gate at extraction time. Valence tags each memory as a pattern to repeat (`positive`), avoid (`negative`), or note (`neutral`).
 
-**Initial confidence** from investigation score:
-
-| Score range | Initial confidence | Rationale |
-|-------------|-------------------|-----------|
-| 80-100 | 0.8 | High-quality investigation |
-| 60-79 | 0.6 | Good investigation |
-| 40-59 | 0.4 | Average — may need reinforcement |
-| 0-39 | 0.3 | Poor — anti-patterns at low confidence |
-
+**Initial confidence:** `0.7` (flat — the Reflector already filters low-quality findings).
 **Reinforcement:** `min(confidence × 1.1, 1.0)`.
 **Feedback-derived memories:** 0.9 initial confidence.
-**Decay:** Not in v1. Future: query-time multiplier `score × e^(-λ × age_in_days)` with configurable half-life. Applied at retrieval, not stored.
+**Ranking multiplier:** `(0.7 + 0.3 × confidence)` — confidence impact scales with semantic relevance.
+**Temporal decay:** `EXP(-0.0077 × age_in_days)` based on `updated_at` (90-day half-life). Reinforcement resets the clock. Applied at retrieval, not stored.
 
 ### Observability
 
@@ -314,8 +340,8 @@ Both are read-only in v1.
 ## Future Considerations
 
 - **Dedicated memory management page** — aggregate view of all memories across investigations, with search, filtering, and bulk operations
-- **Memory decay** — query-time temporal decay multiplier when the store grows large enough to need pruning
 - **Batch embedding** — Google's `batchEmbedContents` endpoint for reducing round trips when extraction volume grows
 - **Per-chain memory enable/disable** — trivial to add if some chains shouldn't participate in memory
 - **Per-memory human feedback** — more granular than session-level signals, if needed
 - **Memory promotion** — promoting high-confidence memories to permanent skills or custom_instructions
+- **`search_past_sessions` scope expansion** — include `final_analysis` in the tsvector column if agents need to search investigation conclusions

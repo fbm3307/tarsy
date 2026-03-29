@@ -1,21 +1,21 @@
 {
   "created_at": "{TIMESTAMP}",
   "duration_ms": {DURATION_MS},
-  "id": "{INTERACTION_ID_8}",
-  "input_tokens": 200,
+  "id": "{INTERACTION_ID_4}",
+  "input_tokens": 100,
   "interaction_type": "iteration",
   "llm_request": {
-    "iteration": 2,
-    "messages_count": 4
+    "iteration": 1,
+    "messages_count": 2
   },
   "llm_response": {
-    "text_length": 69,
-    "tool_calls_count": 0
+    "text_length": 34,
+    "tool_calls_count": 1
   },
   "model_name": "test-model",
-  "output_tokens": 40,
-  "thinking_content": "Past investigations suggest checking PgBouncer.",
-  "total_tokens": 240
+  "output_tokens": 30,
+  "thinking_content": "Let me search for past investigations involving nonexistent-service.",
+  "total_tokens": 130
 }
 
 === MESSAGE: system ===
@@ -54,7 +54,7 @@ Focus on answering follow-up questions about a completed investigation for human
 
 ### Alert Data
 <!-- ALERT_DATA_START -->
-Pod latency alert in production
+Test alert for no-match scenario
 <!-- ALERT_DATA_END -->
 
 ## Runbook Content
@@ -69,39 +69,20 @@ No runbook available.
 **Agent:** MemoryInvestigator (google-native, test-provider)
 **Status**: completed
 
-**Pre-loaded Memories (3):**
-
-- [procedural, positive, score: {SCORE}, learned {AGE}] Check PgBouncer connection pool health before investigating query latency
-- [procedural, negative, score: {SCORE}, learned {AGE}] container_memory_rss metric does not exist in this setup
-- [semantic, neutral, score: {SCORE}, learned {AGE}] Normal error rate for batch-processor during 2-4am is ~200/hr
-
 **Internal Reasoning:**
 
-Let me check the pods.
+Quick investigation.
 
 **Agent Response:**
 
-Checking pod status.
-
-**Tool Call:** test-mcp.get_pods({"namespace":"default"})
-**Result:**
-
-[{"name":"pod-1","status":"Running","restarts":0}]
-
-**Internal Reasoning:**
-
-Pods look fine. Investigation complete.
-
-**Agent Response:**
-
-Investigation complete: all pods healthy.
+Investigation complete: no issues found.
 
 
 ═══════════════════════════════════════════════════════════════════════════════
 🎯 CURRENT TASK
 ═══════════════════════════════════════════════════════════════════════════════
 
-**Question:** What patterns have we seen before?
+**Question:** Was nonexistent-service-xyz investigated before?
 
 **Your Task:**
 Answer the user's question based on the investigation context above.
@@ -113,21 +94,7 @@ Begin your response:
 
 
 === MESSAGE: assistant ===
-Searching past investigations.
+Searching for nonexistent-service.
 --- TOOL_CALLS ---
-[recall-1] recall_past_investigations({"query":"pod health check patterns","limit":10})
-
-=== MESSAGE: tool (recall-1, recall_past_investigations) ===
-<historical_context>
-Found 3 relevant memories:
-
-1. [procedural, positive, score: {SCORE}, learned {AGE}] Check PgBouncer connection pool health before investigating query latency
-2. [semantic, neutral, score: {SCORE}, learned {AGE}] Normal error rate for batch-processor during 2-4am is ~200/hr
-3. [procedural, negative, score: {SCORE}, learned {AGE}] container_memory_rss metric does not exist in this setup
-
-These are learnings from PAST incidents — they suggest where to look, not what you will find NOW.
-</historical_context>
-
-=== MESSAGE: assistant ===
-Based on past investigations, check PgBouncer connection pool health.
+[search-1] search_past_sessions({"query":"nonexistent-service-xyz"})
 

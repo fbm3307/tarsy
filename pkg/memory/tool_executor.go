@@ -12,12 +12,17 @@ import (
 // Compile-time check that ToolExecutor implements agent.ToolExecutor.
 var _ agent.ToolExecutor = (*ToolExecutor)(nil)
 
-// ToolRecallPastInvestigations is the tool name for on-demand memory search.
-const ToolRecallPastInvestigations = "recall_past_investigations"
+const (
+	// ToolRecallPastInvestigations is the tool name for on-demand memory search.
+	ToolRecallPastInvestigations = "recall_past_investigations"
+
+	// ToolSearchPastSessions is the tool name for entity-level session search.
+	ToolSearchPastSessions = "search_past_sessions"
+)
 
 // IsMemoryTool reports whether name is a known memory tool.
 func IsMemoryTool(name string) bool {
-	return name == ToolRecallPastInvestigations
+	return name == ToolRecallPastInvestigations || name == ToolSearchPastSessions
 }
 
 // recallTool is the tool definition exposed to the LLM.
@@ -41,46 +46,84 @@ var recallTool = agent.ToolDefinition{
 }`,
 }
 
+var searchSessionsTool = agent.ToolDefinition{
+	Name: ToolSearchPastSessions,
+	Description: `Search past investigation sessions by keywords in alert data. Use to check if a specific entity (e.g. user, namespace, workload, IP, service) was investigated before — critical for escalation and pattern-of-behavior decisions. Pass specific identifiers as the query — one or a few key terms per call. For unrelated identifiers, make separate calls. Do NOT pass natural language sentences. Returns a focused summary of matching investigations including conclusions, quality assessments, and human review corrections.
+
+Good queries: 'john-doe' (single identifier), 'john-doe my-namespace' (both must match — narrows results), 'nginx-proxy', 'coolify'
+Bad queries: 'check if user john-doe was investigated before in my-namespace' (natural language — every word must match, will return nothing)`,
+	ParametersSchema: `{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Specific identifiers to search for — short terms, not natural language"
+    },
+    "alert_type": {
+      "type": "string",
+      "description": "Filter by alert type (optional)"
+    },
+    "days_back": {
+      "type": "integer",
+      "description": "How far back to search in days (default: 30)",
+      "default": 30
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max sessions to return (default: 5, max: 10)",
+      "default": 5
+    }
+  },
+  "required": ["query"]
+}`,
+}
+
 const (
-	recallDefaultLimit = 10
-	recallMaxLimit     = 20
+	recallDefaultLimit        = 10
+	recallMaxLimit            = 20
+	sessionSearchDefaultLimit = 5
+	sessionSearchMaxLimit     = 10
+	sessionSearchDefaultDays  = 30
 )
 
 // ToolExecutor wraps an inner agent.ToolExecutor and intercepts
-// recall_past_investigations calls. Everything else passes through.
+// memory tool calls. Everything else passes through.
 type ToolExecutor struct {
 	inner      agent.ToolExecutor
 	service    *Service
+	sessionID  string
 	project    string
-	alertType  *string
-	chainID    *string
 	excludeIDs map[string]struct{}
 }
 
 // NewToolExecutor creates a memory tool executor.
-// inner may be nil (safely handled). excludeIDs contains memory IDs already
-// auto-injected into the prompt — they are filtered from tool results.
+// inner may be nil (safely handled). sessionID is the current session
+// (excluded from search_past_sessions results to avoid returning itself).
+// excludeIDs contains memory IDs already auto-injected into the prompt —
+// they are filtered from recall tool results.
 func NewToolExecutor(
 	inner agent.ToolExecutor,
 	service *Service,
+	sessionID string,
 	project string,
-	alertType *string,
-	chainID *string,
 	excludeIDs map[string]struct{},
 ) *ToolExecutor {
 	return &ToolExecutor{
 		inner:      inner,
 		service:    service,
+		sessionID:  sessionID,
 		project:    project,
-		alertType:  alertType,
-		chainID:    chainID,
 		excludeIDs: excludeIDs,
 	}
 }
 
-// ListTools returns the combined tool set: recall_past_investigations + inner tools.
+// ListTools returns the combined tool set: memory tools + inner tools.
+// Memory tools are only included when the service is available.
 func (te *ToolExecutor) ListTools(ctx context.Context) ([]agent.ToolDefinition, error) {
-	tools := []agent.ToolDefinition{recallTool}
+	var tools []agent.ToolDefinition
+	if te.service != nil {
+		tools = append(tools, recallTool, searchSessionsTool)
+	}
 
 	if te.inner != nil {
 		innerTools, err := te.inner.ListTools(ctx)
@@ -88,7 +131,7 @@ func (te *ToolExecutor) ListTools(ctx context.Context) ([]agent.ToolDefinition, 
 			return nil, fmt.Errorf("failed to list inner tools: %w", err)
 		}
 		for _, t := range innerTools {
-			if t.Name == ToolRecallPastInvestigations {
+			if IsMemoryTool(t.Name) {
 				continue
 			}
 			tools = append(tools, t)
@@ -98,10 +141,13 @@ func (te *ToolExecutor) ListTools(ctx context.Context) ([]agent.ToolDefinition, 
 	return tools, nil
 }
 
-// Execute routes the call to recall_past_investigations or the inner executor.
+// Execute routes the call to the appropriate handler or the inner executor.
 func (te *ToolExecutor) Execute(ctx context.Context, call agent.ToolCall) (*agent.ToolResult, error) {
-	if call.Name == ToolRecallPastInvestigations {
+	switch call.Name {
+	case ToolRecallPastInvestigations:
 		return te.executeRecall(ctx, call)
+	case ToolSearchPastSessions:
+		return te.executeSessionSearch(ctx, call)
 	}
 	if te.inner != nil {
 		return te.inner.Execute(ctx, call)
@@ -123,6 +169,13 @@ func (te *ToolExecutor) Close() error {
 }
 
 func (te *ToolExecutor) executeRecall(ctx context.Context, call agent.ToolCall) (*agent.ToolResult, error) {
+	if te.service == nil {
+		return &agent.ToolResult{
+			CallID: call.ID, Name: call.Name,
+			Content: "memory service is not available", IsError: true,
+		}, nil
+	}
+
 	var args struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
@@ -155,7 +208,7 @@ func (te *ToolExecutor) executeRecall(ctx context.Context, call agent.ToolCall) 
 	// Fetch extra candidates so we can filter out already-injected IDs
 	fetchLimit := limit + len(te.excludeIDs)
 	memories, err := te.service.FindSimilarWithBoosts(
-		ctx, te.project, args.Query, te.alertType, te.chainID, fetchLimit,
+		ctx, te.project, args.Query, fetchLimit,
 	)
 	if err != nil {
 		return &agent.ToolResult{
@@ -187,15 +240,148 @@ func (te *ToolExecutor) executeRecall(ctx context.Context, call agent.ToolCall) 
 	}
 
 	var sb strings.Builder
+	sb.WriteString("<historical_context>\n")
 	sb.WriteString(fmt.Sprintf("Found %d relevant memories:\n", len(filtered)))
 	for i, m := range filtered {
 		age := FormatMemoryAge(m.CreatedAt, m.UpdatedAt)
-		sb.WriteString(fmt.Sprintf("\n%d. [%s, %s, score: %.2f, %s] %s", i+1, m.Category, m.Valence, m.Score, age, m.Content))
+		sb.WriteString(fmt.Sprintf("\n%d. [%s, %s, score: %.2f, %s] %s", i+1, m.Category, m.Valence, m.Similarity, age, m.Content))
 	}
+	sb.WriteString("\n\nThese are learnings from PAST incidents — they suggest where to look, not what you will find NOW.\n</historical_context>")
 
 	return &agent.ToolResult{
 		CallID:  call.ID,
 		Name:    call.Name,
 		Content: sb.String(),
 	}, nil
+}
+
+func (te *ToolExecutor) executeSessionSearch(ctx context.Context, call agent.ToolCall) (*agent.ToolResult, error) {
+	if te.service == nil {
+		return &agent.ToolResult{
+			CallID: call.ID, Name: call.Name,
+			Content: "memory service is not available", IsError: true,
+		}, nil
+	}
+
+	var args struct {
+		Query     string `json:"query"`
+		AlertType string `json:"alert_type"`
+		DaysBack  int    `json:"days_back"`
+		Limit     int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+		return &agent.ToolResult{
+			CallID:  call.ID,
+			Name:    call.Name,
+			Content: fmt.Sprintf("invalid arguments: %v", err),
+			IsError: true,
+		}, nil
+	}
+	if args.Query == "" {
+		return &agent.ToolResult{
+			CallID:  call.ID,
+			Name:    call.Name,
+			Content: "'query' is required and must be non-empty",
+			IsError: true,
+		}, nil
+	}
+
+	if args.DaysBack <= 0 {
+		args.DaysBack = sessionSearchDefaultDays
+	}
+	limit := args.Limit
+	if limit <= 0 {
+		limit = sessionSearchDefaultLimit
+	}
+	if limit > sessionSearchMaxLimit {
+		limit = sessionSearchMaxLimit
+	}
+
+	var alertTypePtr *string
+	if args.AlertType != "" {
+		alertTypePtr = &args.AlertType
+	}
+
+	sessions, err := te.service.SearchSessions(ctx, SessionSearchParams{
+		Query:            args.Query,
+		AlertType:        alertTypePtr,
+		DaysBack:         args.DaysBack,
+		Limit:            limit,
+		ExcludeSessionID: te.sessionID,
+	})
+	if err != nil {
+		return &agent.ToolResult{
+			CallID:  call.ID,
+			Name:    call.Name,
+			Content: fmt.Sprintf("session search failed: %v", err),
+			IsError: true,
+		}, nil
+	}
+
+	if len(sessions) == 0 {
+		return &agent.ToolResult{
+			CallID:  call.ID,
+			Name:    call.Name,
+			Content: "No matching sessions found for this query.",
+		}, nil
+	}
+
+	userPrompt := buildSessionSummarizationPrompt(args.Query, sessions)
+
+	return &agent.ToolResult{
+		CallID:  call.ID,
+		Name:    call.Name,
+		Content: userPrompt,
+		RequiredSummarization: &agent.SummarizationRequest{
+			SystemPrompt:    sessionSummarizationSystemPrompt,
+			UserPrompt:      userPrompt,
+			TransformResult: wrapHistoricalContext("REMINDER: The above is HISTORICAL data from past sessions — it describes what was found THEN, not what is happening NOW. Use it for context and pattern recognition only. Your current investigation must rely on live tool results and sub-agent findings."),
+		},
+	}, nil
+}
+
+const sessionSummarizationSystemPrompt = `You are a summarization assistant for TARSy, an automated incident investigation platform. You are given a set of past investigation sessions that matched a keyword search, along with the original search query.
+
+Produce a focused digest covering:
+- Whether the searched entity (e.g. user, workload, service, IP) was investigated before
+- What the conclusions were for each matching investigation
+- Any human review corrections or quality assessments
+- Patterns across multiple investigations of the same entity
+
+Preserve entity identifiers exactly as they appear — do not paraphrase names, namespaces, or IPs. Silently omit sessions that matched coincidentally but involve a different entity than the one queried.
+
+Be concise but complete. Present the findings; do not interpret them or suggest next steps.`
+
+// wrapHistoricalContext returns a TransformResult function that wraps content
+// in <historical_context> tags with the given reminder text.
+func wrapHistoricalContext(reminder string) func(string) string {
+	return func(content string) string {
+		return "<historical_context>\n" + content + "\n\n" + reminder + "\n</historical_context>"
+	}
+}
+
+func buildSessionSummarizationPrompt(query string, sessions []SessionSearchResult) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Search query: %s\n\nMatched sessions (%d):\n", query, len(sessions)))
+
+	for i, s := range sessions {
+		sb.WriteString(fmt.Sprintf("\n--- Session %d (ID: %s, %s) ---\n", i+1, s.SessionID, s.CreatedAt.Format("2006-01-02 15:04")))
+		sb.WriteString(fmt.Sprintf("Alert type: %s\n", s.AlertType))
+		sb.WriteString(fmt.Sprintf("Alert data:\n%s\n", s.AlertData))
+
+		if s.FinalAnalysis != nil {
+			sb.WriteString(fmt.Sprintf("Investigation conclusions:\n%s\n", *s.FinalAnalysis))
+		} else {
+			sb.WriteString("Investigation conclusions: (none recorded)\n")
+		}
+
+		if s.QualityRating != nil {
+			sb.WriteString(fmt.Sprintf("Quality assessment: %s\n", *s.QualityRating))
+		}
+		if s.InvestigationFeedback != nil {
+			sb.WriteString(fmt.Sprintf("Human review feedback: %s\n", *s.InvestigationFeedback))
+		}
+	}
+
+	return sb.String()
 }

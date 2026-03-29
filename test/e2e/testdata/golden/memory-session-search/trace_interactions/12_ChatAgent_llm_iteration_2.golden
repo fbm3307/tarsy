@@ -1,7 +1,7 @@
 {
   "created_at": "{TIMESTAMP}",
   "duration_ms": {DURATION_MS},
-  "id": "{INTERACTION_ID_8}",
+  "id": "{INTERACTION_ID_9}",
   "input_tokens": 200,
   "interaction_type": "iteration",
   "llm_request": {
@@ -9,12 +9,12 @@
     "messages_count": 4
   },
   "llm_response": {
-    "text_length": 69,
+    "text_length": 141,
     "tool_calls_count": 0
   },
   "model_name": "test-model",
   "output_tokens": 40,
-  "thinking_content": "Past investigations suggest checking PgBouncer.",
+  "thinking_content": "Past investigation shows nginx-proxy had a liveness probe issue.",
   "total_tokens": 240
 }
 
@@ -54,7 +54,7 @@ Focus on answering follow-up questions about a completed investigation for human
 
 ### Alert Data
 <!-- ALERT_DATA_START -->
-Pod latency alert in production
+High latency alert for web service
 <!-- ALERT_DATA_END -->
 
 ## Runbook Content
@@ -69,15 +69,9 @@ No runbook available.
 **Agent:** MemoryInvestigator (google-native, test-provider)
 **Status**: completed
 
-**Pre-loaded Memories (3):**
-
-- [procedural, positive, score: {SCORE}, learned {AGE}] Check PgBouncer connection pool health before investigating query latency
-- [procedural, negative, score: {SCORE}, learned {AGE}] container_memory_rss metric does not exist in this setup
-- [semantic, neutral, score: {SCORE}, learned {AGE}] Normal error rate for batch-processor during 2-4am is ~200/hr
-
 **Internal Reasoning:**
 
-Let me check the pods.
+Let me check pod status.
 
 **Agent Response:**
 
@@ -90,18 +84,18 @@ Checking pod status.
 
 **Internal Reasoning:**
 
-Pods look fine. Investigation complete.
+Pods are healthy.
 
 **Agent Response:**
 
-Investigation complete: all pods healthy.
+Investigation complete: all pods running normally.
 
 
 ═══════════════════════════════════════════════════════════════════════════════
 🎯 CURRENT TASK
 ═══════════════════════════════════════════════════════════════════════════════
 
-**Question:** What patterns have we seen before?
+**Question:** Has nginx-proxy been investigated before?
 
 **Your Task:**
 Answer the user's question based on the investigation context above.
@@ -113,21 +107,17 @@ Begin your response:
 
 
 === MESSAGE: assistant ===
-Searching past investigations.
+Searching past sessions for nginx-proxy.
 --- TOOL_CALLS ---
-[recall-1] recall_past_investigations({"query":"pod health check patterns","limit":10})
+[search-1] search_past_sessions({"query":"nginx-proxy"})
 
-=== MESSAGE: tool (recall-1, recall_past_investigations) ===
+=== MESSAGE: tool (search-1, search_past_sessions) ===
 <historical_context>
-Found 3 relevant memories:
+nginx-proxy was previously investigated for CrashLoopBackOff in namespace coolify. The root cause was a misconfigured liveness probe, resolved by adjusting the threshold. Investigation rated accurate.
 
-1. [procedural, positive, score: {SCORE}, learned {AGE}] Check PgBouncer connection pool health before investigating query latency
-2. [semantic, neutral, score: {SCORE}, learned {AGE}] Normal error rate for batch-processor during 2-4am is ~200/hr
-3. [procedural, negative, score: {SCORE}, learned {AGE}] container_memory_rss metric does not exist in this setup
-
-These are learnings from PAST incidents — they suggest where to look, not what you will find NOW.
+REMINDER: The above is HISTORICAL data from past sessions — it describes what was found THEN, not what is happening NOW. Use it for context and pattern recognition only. Your current investigation must rely on live tool results and sub-agent findings.
 </historical_context>
 
 === MESSAGE: assistant ===
-Based on past investigations, check PgBouncer connection pool health.
+nginx-proxy was previously investigated. The issue was a misconfigured liveness probe in namespace coolify, fixed by adjusting the threshold.
 

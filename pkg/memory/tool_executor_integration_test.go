@@ -37,17 +37,20 @@ func TestToolExecutor_Recall_FormattedResults(t *testing.T) {
 		}})
 	require.NoError(t, err)
 
-	te := memory.NewToolExecutor(nil, svc, "default", nil, nil, nil)
+	te := memory.NewToolExecutor(nil, svc, "", "default", nil)
 	result, err := te.Execute(ctx, recallToolCall(t, "check health", 10))
 	require.NoError(t, err)
 
 	assert.False(t, result.IsError)
 	assert.Equal(t, "call-1", result.CallID)
+	assert.Contains(t, result.Content, "<historical_context>")
+	assert.Contains(t, result.Content, "</historical_context>")
 	assert.Contains(t, result.Content, "Found 2 relevant memories")
 	assert.Contains(t, result.Content, "procedural, positive, score:")
 	assert.Contains(t, result.Content, "Check PgBouncer health first")
 	assert.Contains(t, result.Content, "episodic, neutral, score:")
 	assert.Contains(t, result.Content, "OOMKill uses working_set_bytes")
+	assert.Contains(t, result.Content, "learnings from PAST incidents")
 }
 
 func TestToolExecutor_Recall_ExcludesInjectedIDs(t *testing.T) {
@@ -66,7 +69,7 @@ func TestToolExecutor_Recall_ExcludesInjectedIDs(t *testing.T) {
 	require.Len(t, all, 2)
 
 	excludeIDs := map[string]struct{}{all[0].ID: {}}
-	te := memory.NewToolExecutor(nil, svc, "default", nil, nil, excludeIDs)
+	te := memory.NewToolExecutor(nil, svc, "", "default", excludeIDs)
 
 	result, err := te.Execute(ctx, recallToolCall(t, "anything", 10))
 	require.NoError(t, err)
@@ -92,7 +95,7 @@ func TestToolExecutor_Recall_AllExcluded(t *testing.T) {
 	require.Len(t, all, 1)
 
 	excludeIDs := map[string]struct{}{all[0].ID: {}}
-	te := memory.NewToolExecutor(nil, svc, "default", nil, nil, excludeIDs)
+	te := memory.NewToolExecutor(nil, svc, "", "default", excludeIDs)
 
 	result, err := te.Execute(ctx, recallToolCall(t, "anything", 10))
 	require.NoError(t, err)
@@ -115,7 +118,7 @@ func TestToolExecutor_Recall_LimitApplied(t *testing.T) {
 		}})
 	require.NoError(t, err)
 
-	te := memory.NewToolExecutor(nil, svc, "default", nil, nil, nil)
+	te := memory.NewToolExecutor(nil, svc, "", "default", nil)
 
 	result, err := te.Execute(ctx, recallToolCall(t, "test", 2))
 	require.NoError(t, err)
@@ -127,7 +130,7 @@ func TestToolExecutor_Recall_LimitApplied(t *testing.T) {
 func TestToolExecutor_Recall_NoMemoriesInDB(t *testing.T) {
 	svc, _ := newTestService(t, []float32{1, 0, 0})
 
-	te := memory.NewToolExecutor(nil, svc, "default", nil, nil, nil)
+	te := memory.NewToolExecutor(nil, svc, "", "default", nil)
 
 	result, err := te.Execute(t.Context(), recallToolCall(t, "nothing matches", 0))
 	require.NoError(t, err)
@@ -149,7 +152,7 @@ func TestToolExecutor_Recall_DefaultLimit(t *testing.T) {
 		}})
 	require.NoError(t, err)
 
-	te := memory.NewToolExecutor(nil, svc, "default", nil, nil, nil)
+	te := memory.NewToolExecutor(nil, svc, "", "default", nil)
 
 	result, err := te.Execute(ctx, recallToolCall(t, "test", 0))
 	require.NoError(t, err)
@@ -163,7 +166,7 @@ func TestToolExecutor_Recall_DelegatesNonRecallToInner(t *testing.T) {
 	inner := agent.NewStubToolExecutor([]agent.ToolDefinition{
 		{Name: "server1.read_file", Description: "Reads a file"},
 	})
-	te := memory.NewToolExecutor(inner, svc, "default", nil, nil, nil)
+	te := memory.NewToolExecutor(inner, svc, "", "default", nil)
 
 	result, err := te.Execute(t.Context(), agent.ToolCall{
 		ID:        "call-2",
