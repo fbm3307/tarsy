@@ -670,6 +670,41 @@ func newMinimalRunner(maxConcurrent int) *SubAgentRunner {
 	)
 }
 
+// TestSubAgentRunner_Dispatch_NeverSetsOrchestratorFields verifies the
+// circularity prevention invariant: sub-agents dispatched by the orchestrator
+// must have SubAgent set but must never receive SubAgentCatalog or
+// SubAgentCollector, ensuring they cannot dispatch further sub-agents.
+func TestSubAgentRunner_Dispatch_NeverSetsOrchestratorFields(t *testing.T) {
+	ctx := context.Background()
+
+	var captured atomic.Pointer[agent.ExecutionContext]
+	runner, cleanup := setupIntegrationRunner(t,
+		func(_ context.Context) (*agent.ExecutionResult, error) {
+			return &agent.ExecutionResult{
+				Status:        agent.ExecutionStatusCompleted,
+				FinalAnalysis: "done",
+			}, nil
+		},
+		func(execCtx *agent.ExecutionContext) {
+			captured.Store(execCtx)
+		},
+	)
+	defer cleanup()
+
+	_, err := runner.Dispatch(ctx, "TestAgent", "verify no orchestrator wiring")
+	require.NoError(t, err)
+
+	_, err = runner.WaitForNext(ctx)
+	require.NoError(t, err)
+
+	execCtx := captured.Load()
+	require.NotNil(t, execCtx, "controller should have captured the execution context")
+
+	assert.NotNil(t, execCtx.SubAgent, "sub-agent context must be set")
+	assert.Nil(t, execCtx.SubAgentCatalog, "sub-agents must not receive SubAgentCatalog")
+	assert.Nil(t, execCtx.SubAgentCollector, "sub-agents must not receive SubAgentCollector")
+}
+
 // mockControllerFactory returns a factory that produces controllers
 // calling resultFn when Run is invoked. resultFn receives ctx so tests
 // can respect context cancellation/timeout.
@@ -687,6 +722,19 @@ type mockController struct {
 
 func (c *mockController) Run(ctx context.Context, _ *agent.ExecutionContext, _ string) (*agent.ExecutionResult, error) {
 	return c.resultFn(ctx)
+}
+
+// capturingControllerFactory captures the ExecutionContext before delegating to the mock.
+type capturingControllerFactory struct {
+	resultFn  func(ctx context.Context) (*agent.ExecutionResult, error)
+	captureFn func(execCtx *agent.ExecutionContext)
+}
+
+func (f *capturingControllerFactory) CreateController(_ config.AgentType, execCtx *agent.ExecutionContext) (agent.Controller, error) {
+	if f.captureFn != nil {
+		f.captureFn(execCtx)
+	}
+	return &mockController{resultFn: f.resultFn}, nil
 }
 
 // Compile-time check that noopEventPublisher satisfies agent.EventPublisher.
@@ -776,9 +824,12 @@ func (r *recordingEventPublisher) timelineCreated() []events.TimelineCreatedPayl
 
 // setupIntegrationRunner creates a fully wired SubAgentRunner backed by
 // testcontainers PostgreSQL. resultFn controls what the mock agent returns.
+// An optional captureFn, if provided, is called with the ExecutionContext
+// before each controller Run (useful for inspecting what was passed to sub-agents).
 func setupIntegrationRunner(
 	t *testing.T,
 	resultFn func(ctx context.Context) (*agent.ExecutionResult, error),
+	captureFn ...func(execCtx *agent.ExecutionContext),
 ) (*SubAgentRunner, func()) {
 	t.Helper()
 
@@ -849,7 +900,13 @@ func setupIntegrationRunner(
 		}},
 	}
 
-	agentFactory := agent.NewAgentFactory(&mockControllerFactory{resultFn: resultFn})
+	var factory agent.ControllerFactory
+	if len(captureFn) > 0 && captureFn[0] != nil {
+		factory = &capturingControllerFactory{resultFn: resultFn, captureFn: captureFn[0]}
+	} else {
+		factory = &mockControllerFactory{resultFn: resultFn}
+	}
+	agentFactory := agent.NewAgentFactory(factory)
 
 	registry := config.BuildSubAgentRegistry(cfg.AgentRegistry.GetAll())
 
